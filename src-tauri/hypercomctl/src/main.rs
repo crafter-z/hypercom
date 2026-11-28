@@ -1,6 +1,7 @@
 mod args;
 mod loan_cmd;
 mod mcp;
+mod plugin_cmd;
 mod remote_cmd;
 
 use args::{Action, Cli, ExpectInput, Format, Target, USAGE};
@@ -37,7 +38,7 @@ impl Failure {
             "host_unavailable" | "pin_mismatch" | "protocol_mismatch" => 3,
             "expect_timeout" | "idle_timeout" | "timeout" => 5,
             "output_error" | "broken_pipe" | "internal_error" | "outcome_unknown"
-            | "profile_io" | "spawn_failed" => 1,
+            | "profile_io" | "spawn_failed" | "artifact_io" => 1,
             _ => 4,
         }
     }
@@ -139,6 +140,13 @@ async fn run(cli: Cli, out: &mut impl Write) -> Result<i32, Failure> {
         }
         Action::Loan(loan_action) => {
             loan_cmd::execute(&target, format, loan_action, out).await
+        }
+        Action::Plugin(plugin_action) => {
+            plugin_cmd::execute_plugin(&target, format, plugin_action, out).await
+        }
+        Action::Artifact(artifact_action) => {
+            plugin_cmd::execute_artifact(&target, format, artifact_action, out).await?;
+            Ok(0)
         }
         Action::Remote(remote_action) => {
             remote_cmd::execute(&target, format, remote_action, out).await?;

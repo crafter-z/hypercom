@@ -13,5 +13,6 @@ hypercom-protocol = { path = "../hypercom-protocol" }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "process", "signal", "time", "sync"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-std", "io-util", "process", "signal", "time", "sync"] }
 uuid = { version = "1", features = ["v4"] }

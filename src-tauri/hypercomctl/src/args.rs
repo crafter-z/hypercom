@@ -1,6 +1,7 @@
 use hypercom_protocol::{
     RemoteRole, SerialParamsDto, DEFAULT_ENDPOINT, MAX_EXPECT_BYTES, MAX_EXPECT_MS, MAX_WRITE_BYTES,
 };
+use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub const USAGE: &str = "\
@@ -44,8 +45,19 @@ Commands:
   loan release <LEASE_ID> [--reopen | --no-reopen]
   loan reclaim <PORT>
   loan list
+  plugin list              List available local and remote plugin tools
+  plugin call <PLUGIN_ID> <TOOL> [--target local|remote::<PROFILE>] [--args JSON]
+              [--artifact ID]... [--timeout 30s] [--wait]
+                           Invoke a plugin tool (and optionally wait for async job completion)
+  plugin job <JOB_ID> [--target local|remote::<PROFILE>] [--after SEQ] [--follow]
+                           Poll or follow an async plugin job
+  plugin cancel <JOB_ID> [--target local|remote::<PROFILE>]
+                           Cancel a running plugin job
+  artifact upload <FILE_PATH> [--target local|remote::<PROFILE>] [--name NAME] [--ttl 30m]
+                           Stream a local file to the host as an artifact for plugin tools
   remote status|start|stop|invite|clients|revoke|pair|profiles|check|forget
                            Manage remote TLS 1.3 host listener and paired client profiles
+                           (remote invite supports [--device-plugins])
   mcp                      Run built-in JSON-RPC 2.0 stdio MCP server
 ";
 
@@ -116,6 +128,7 @@ pub enum RemoteAction {
         ports: Vec<String>,
         role: RemoteRole,
         allow_loan: bool,
+        device_plugins: bool,
         ttl_secs: Option<u64>,
     },
     Clients,
@@ -132,6 +145,40 @@ pub enum RemoteAction {
     },
     Forget {
         profile: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginAction {
+    List,
+    Call {
+        plugin_id: String,
+        tool: String,
+        target: Option<String>,
+        args: Value,
+        artifacts: Vec<String>,
+        timeout_ms: Option<u64>,
+        wait: bool,
+    },
+    Job {
+        job_id: String,
+        target: Option<String>,
+        after_seq: Option<u64>,
+        follow: bool,
+    },
+    Cancel {
+        job_id: String,
+        target: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactAction {
+    Upload {
+        file_path: String,
+        target: Option<String>,
+        name: Option<String>,
+        ttl_ms: Option<u64>,
     },
 }
 
@@ -191,6 +238,8 @@ pub enum Action {
         source: Option<String>,
     },
     Loan(LoanAction),
+    Plugin(PluginAction),
+    Artifact(ArtifactAction),
     Remote(RemoteAction),
     Mcp,
 }
@@ -236,9 +285,20 @@ const VALUE_OPTIONS: &[&str] = &[
     "role",
     "client-id",
     "invite-file",
+    "target",
+    "args",
+    "artifact",
+    "name",
 ];
 
-const FLAG_OPTIONS: &[&str] = &["no-reopen", "reopen", "allow-loan"];
+const FLAG_OPTIONS: &[&str] = &[
+    "no-reopen",
+    "reopen",
+    "allow-loan",
+    "device-plugins",
+    "wait",
+    "follow",
+];
 
 pub fn detect_format_hint(args: &[String]) -> Format {
     let mut iter = args.iter();
@@ -501,6 +561,16 @@ pub fn parse_with_env(
         ["loan", rest @ ..] => {
             let loan_action = parse_loan(rest, passthrough, &mut opts, &mut flags)?;
             Action::Loan(loan_action)
+        }
+        ["plugin", "help"] => Action::Help,
+        ["plugin", rest @ ..] => {
+            let plugin_action = parse_plugin(rest, &mut opts, &mut flags)?;
+            Action::Plugin(plugin_action)
+        }
+        ["artifact", "help"] => Action::Help,
+        ["artifact", rest @ ..] => {
+            let artifact_action = parse_artifact(rest, &mut opts)?;
+            Action::Artifact(artifact_action)
         }
         ["remote", "help"] => Action::Help,
         ["remote", rest @ ..] => {
@@ -960,6 +1030,7 @@ fn parse_remote(
                 None => RemoteRole::Observe,
             };
             let allow_loan = take_flag(flags, "allow-loan")?;
+            let device_plugins = take_flag(flags, "device-plugins")?;
             let ttl_secs = take_single_opt(opts, "ttl")?
                 .map(|v| parse_ttl_secs(&v, "--ttl"))
                 .transpose()?;
@@ -968,6 +1039,7 @@ fn parse_remote(
                 ports,
                 role,
                 allow_loan,
+                device_plugins,
                 ttl_secs,
             })
         }
@@ -1001,6 +1073,103 @@ fn parse_remote(
             "usage: hypercomctl remote (status|start|stop|invite|clients|revoke|pair|profiles|check|forget)"
                 .into(),
         ),
+    }
+}
+
+fn non_empty_value(val: &str, label: &str) -> Result<String, String> {
+    if val.is_empty() {
+        return Err(format!("{label} cannot be empty"));
+    }
+    Ok(val.to_owned())
+}
+
+fn take_non_empty_opt(
+    opts: &mut BTreeMap<String, Vec<String>>,
+    name: &str,
+) -> Result<Option<String>, String> {
+    take_single_opt(opts, name)?
+        .map(|val| non_empty_value(&val, &format!("--{name}")))
+        .transpose()
+}
+
+fn parse_plugin(
+    rest: &[&str],
+    opts: &mut BTreeMap<String, Vec<String>>,
+    flags: &mut BTreeMap<String, usize>,
+) -> Result<PluginAction, String> {
+    match rest {
+        ["list"] => Ok(PluginAction::List),
+        ["call", plugin_id, tool] => {
+            let plugin_id = non_empty_value(plugin_id, "<PLUGIN_ID>")?;
+            let tool = non_empty_value(tool, "<TOOL>")?;
+            let target = take_non_empty_opt(opts, "target")?;
+            let args = match take_single_opt(opts, "args")? {
+                Some(raw) => serde_json::from_str::<Value>(&raw)
+                    .map_err(|e| format!("--args must be valid JSON: {e}"))?,
+                None => Value::Object(Default::default()),
+            };
+            let artifacts = take_multi_opt(opts, "artifact")
+                .into_iter()
+                .map(|id| non_empty_value(&id, "--artifact"))
+                .collect::<Result<Vec<_>, _>>()?;
+            let timeout_ms = take_single_opt(opts, "timeout")?
+                .map(|raw| parse_duration_ms(&raw, "--timeout"))
+                .transpose()?;
+            let wait = take_flag(flags, "wait")?;
+            Ok(PluginAction::Call {
+                plugin_id,
+                tool,
+                target,
+                args,
+                artifacts,
+                timeout_ms,
+                wait,
+            })
+        }
+        ["job", job_id] => {
+            let job_id = non_empty_value(job_id, "<JOB_ID>")?;
+            let target = take_non_empty_opt(opts, "target")?;
+            let after_seq = take_u64_opt(opts, "after", 0, u64::MAX)?;
+            let follow = take_flag(flags, "follow")?;
+            Ok(PluginAction::Job {
+                job_id,
+                target,
+                after_seq,
+                follow,
+            })
+        }
+        ["cancel", job_id] => {
+            let job_id = non_empty_value(job_id, "<JOB_ID>")?;
+            let target = take_non_empty_opt(opts, "target")?;
+            Ok(PluginAction::Cancel { job_id, target })
+        }
+        _ => Err(
+            "usage: hypercomctl plugin (list | call <PLUGIN_ID> <TOOL> | job <JOB_ID> | cancel <JOB_ID>)"
+                .into(),
+        ),
+    }
+}
+
+fn parse_artifact(
+    rest: &[&str],
+    opts: &mut BTreeMap<String, Vec<String>>,
+) -> Result<ArtifactAction, String> {
+    match rest {
+        ["upload", file_path] => {
+            let file_path = non_empty_value(file_path, "<FILE_PATH>")?;
+            let target = take_non_empty_opt(opts, "target")?;
+            let name = take_non_empty_opt(opts, "name")?;
+            let ttl_ms = take_single_opt(opts, "ttl")?
+                .map(|raw| parse_duration_ms(&raw, "--ttl"))
+                .transpose()?;
+            Ok(ArtifactAction::Upload {
+                file_path,
+                target,
+                name,
+                ttl_ms,
+            })
+        }
+        _ => Err("usage: hypercomctl artifact upload <FILE_PATH> [--target local|remote::<PROFILE>] [--name NAME] [--ttl 30m]".into()),
     }
 }
 
@@ -1339,7 +1508,30 @@ mod tests {
                 ports: vec!["COM3".into(), "COM4".into()],
                 role: RemoteRole::Control,
                 allow_loan: true,
+                device_plugins: false,
                 ttl_secs: Some(300),
+            })
+        );
+
+        let invite_plugins = test_parse(&[
+            "remote",
+            "invite",
+            "--label",
+            "flasher",
+            "--port",
+            "COM3",
+            "--device-plugins",
+        ])
+        .unwrap();
+        assert_eq!(
+            invite_plugins.action,
+            Action::Remote(RemoteAction::Invite {
+                label: "flasher".into(),
+                ports: vec!["COM3".into()],
+                role: RemoteRole::Observe,
+                allow_loan: false,
+                device_plugins: true,
+                ttl_secs: None,
             })
         );
 
@@ -1372,6 +1564,118 @@ mod tests {
             test_parse(&["--profile", "lab-a", "mcp"]).unwrap().action,
             Action::Mcp
         );
+    }
+
+    #[test]
+    fn parses_plugin_and_artifact_commands() {
+        assert_eq!(
+            test_parse(&["plugin", "list"]).unwrap().action,
+            Action::Plugin(PluginAction::List)
+        );
+
+        let call = test_parse(&[
+            "plugin",
+            "call",
+            "stm32-flasher",
+            "flash",
+            "--target",
+            "remote::lab",
+            "--args",
+            r#"{"port":"COM3","verify":true}"#,
+            "--artifact",
+            "art-1",
+            "--artifact",
+            "art-2",
+            "--timeout",
+            "30s",
+            "--wait",
+        ])
+        .unwrap();
+        assert_eq!(
+            call.action,
+            Action::Plugin(PluginAction::Call {
+                plugin_id: "stm32-flasher".into(),
+                tool: "flash".into(),
+                target: Some("remote::lab".into()),
+                args: serde_json::json!({"port": "COM3", "verify": true}),
+                artifacts: vec!["art-1".into(), "art-2".into()],
+                timeout_ms: Some(30_000),
+                wait: true,
+            })
+        );
+
+        let call_min = test_parse(&["plugin", "call", "diag", "info"]).unwrap();
+        assert_eq!(
+            call_min.action,
+            Action::Plugin(PluginAction::Call {
+                plugin_id: "diag".into(),
+                tool: "info".into(),
+                target: None,
+                args: serde_json::json!({}),
+                artifacts: Vec::new(),
+                timeout_ms: None,
+                wait: false,
+            })
+        );
+
+        assert!(test_parse(&["plugin", "call", "diag", "info", "--args", "{bad"]).is_err());
+        assert!(test_parse(&["plugin", "call", "diag", "info", "--target", ""]).is_err());
+        assert!(test_parse(&["plugin", "call", "diag", "info", "--artifact", ""]).is_err());
+
+        let job = test_parse(&[
+            "plugin",
+            "job",
+            "job-42",
+            "--target",
+            "local",
+            "--after",
+            "10",
+            "--follow",
+        ])
+        .unwrap();
+        assert_eq!(
+            job.action,
+            Action::Plugin(PluginAction::Job {
+                job_id: "job-42".into(),
+                target: Some("local".into()),
+                after_seq: Some(10),
+                follow: true,
+            })
+        );
+
+        let cancel = test_parse(&["plugin", "cancel", "job-42", "--target", "remote::lab"]).unwrap();
+        assert_eq!(
+            cancel.action,
+            Action::Plugin(PluginAction::Cancel {
+                job_id: "job-42".into(),
+                target: Some("remote::lab".into()),
+            })
+        );
+
+        let upload = test_parse(&[
+            "artifact",
+            "upload",
+            "./build/app.bin",
+            "--target",
+            "remote::lab",
+            "--name",
+            "app.bin",
+            "--ttl",
+            "30m",
+        ])
+        .unwrap();
+        assert_eq!(
+            upload.action,
+            Action::Artifact(ArtifactAction::Upload {
+                file_path: "./build/app.bin".into(),
+                target: Some("remote::lab".into()),
+                name: Some("app.bin".into()),
+                ttl_ms: Some(1_800_000),
+            })
+        );
+
+        assert!(test_parse(&["artifact", "upload", ""]).is_err());
+        assert!(test_parse(&["artifact", "upload", "fw.bin", "--name", ""]).is_err());
     }
 
     #[test]

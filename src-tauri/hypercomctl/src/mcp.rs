@@ -1,22 +1,35 @@
-use crate::args::{
-    apply_eol_bytes, normalize_handshake, normalize_parity, normalize_stop_bits, parse_hex_strict,
-    Target,
+use crate::{
+    args::{
+        apply_eol_bytes, normalize_handshake, normalize_parity, normalize_stop_bits,
+        parse_hex_strict, Target,
+    },
+    plugin_cmd::{
+        is_terminal_job_state, parse_plugin_tools_value, upload_artifact_streaming, ControlCaller,
+    },
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hypercom_protocol::{
     AsyncControlClient, ControlCommand, EventPageDto, ExpectSpec, HostError, LoanInfoDto,
+    PluginJobEventDto, PluginJobStatusDto, PluginToolDescriptorDto, PluginToolInvokeResultDto,
     PortSnapshotDto, RequestOutcomeDto, SerialParamsDto, SerialRecoveryDto, StreamEventDto,
-    MAX_EXPECT_BYTES, MAX_EXPECT_MS, MAX_WRITE_BYTES,
+    MAX_EXPECT_BYTES, MAX_EXPECT_MS, MAX_POLL_MS, MAX_WRITE_BYTES,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    process::Stdio,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     process::Command,
+    time::Instant,
 };
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+const DEFAULT_PLUGIN_JOB_WAIT_MS: u64 = 120_000;
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
@@ -38,8 +51,19 @@ enum McpBackend {
     Mock(Box<dyn FnMut(ControlCommand) -> Result<Value, HostError> + Send>),
 }
 
+#[derive(Debug, Clone)]
+struct DynamicToolRoute {
+    target: Option<String>,
+    plugin_id: String,
+    tool: String,
+    #[allow(dead_code)]
+    mode: String,
+}
+
 struct McpState {
     backend: McpBackend,
+    dynamic_tools: HashMap<String, DynamicToolRoute>,
+    dynamic_tools_loaded: bool,
 }
 
 impl McpState {
@@ -49,6 +73,8 @@ impl McpState {
                 target,
                 client: None,
             },
+            dynamic_tools: HashMap::new(),
+            dynamic_tools_loaded: false,
         }
     }
 
@@ -59,6 +85,8 @@ impl McpState {
     {
         Self {
             backend: McpBackend::Mock(Box::new(handler)),
+            dynamic_tools: HashMap::new(),
+            dynamic_tools_loaded: false,
         }
     }
 
@@ -97,6 +125,12 @@ impl McpState {
                 format!("unexpected Host response shape: {err}"),
             )
         })
+    }
+}
+
+impl ControlCaller for McpState {
+    async fn call_cmd(&mut self, cmd: ControlCommand) -> Result<Value, HostError> {
+        self.call_host(cmd).await
     }
 }
 
@@ -213,7 +247,10 @@ async fn dispatch_request(
             }),
         ),
         "ping" => jsonrpc_ok(id, json!({})),
-        "tools/list" => jsonrpc_ok(id, json!({ "tools": tool_definitions() })),
+        "tools/list" => {
+            let tools = list_all_tools(state).await;
+            jsonrpc_ok(id, json!({ "tools": tools }))
+        }
         "tools/call" => {
             let Some(params_obj) = params.as_ref().and_then(Value::as_object) else {
                 return jsonrpc_error(id, -32602, "Invalid params: expected object");
@@ -228,11 +265,18 @@ async fn dispatch_request(
             if !args.is_object() {
                 return jsonrpc_error(id, -32602, "Invalid params: arguments must be an object");
             }
-            if !tool_exists(name) {
-                return jsonrpc_error(id, -32602, format!("Unknown tool: {name}"));
+            if tool_exists(name) {
+                let result = execute_tool(state, name, args).await;
+                return jsonrpc_ok(id, result);
             }
-            let result = execute_tool(state, name, args).await;
-            jsonrpc_ok(id, result)
+            if !state.dynamic_tools.contains_key(name) && !state.dynamic_tools_loaded {
+                let _ = refresh_dynamic_tools(state).await;
+            }
+            if let Some(route) = state.dynamic_tools.get(name).cloned() {
+                let result = execute_dynamic_tool(state, route, args).await;
+                return jsonrpc_ok(id, result);
+            }
+            jsonrpc_error(id, -32602, format!("Unknown tool: {name}"))
         }
         other => jsonrpc_error(id, -32601, format!("Method not found: {other}")),
     }
@@ -299,6 +343,11 @@ fn tool_exists(name: &str) -> bool {
             | "release_serial_loan"
             | "list_active_leases"
             | "run_with_serial_loan"
+            | "list_plugin_tools"
+            | "invoke_plugin_tool"
+            | "poll_plugin_job"
+            | "cancel_plugin_job"
+            | "upload_artifact"
     )
 }
 
@@ -563,8 +612,435 @@ async fn execute_tool(state: &mut McpState, name: &str, args: Value) -> Value {
             }
         }
         "run_with_serial_loan" => run_with_serial_loan_tool(state, args).await,
+        "list_plugin_tools" => match state.call_host(ControlCommand::ListPluginTools).await {
+            Ok(val) => match parse_plugin_tools_value(val) {
+                Ok(tools) => tool_ok(json!({ "tools": tools })),
+                Err(e) => tool_err_host(e),
+            },
+            Err(e) => tool_err_host(e),
+        },
+        "invoke_plugin_tool" => invoke_plugin_tool_mcp(state, args).await,
+        "poll_plugin_job" => {
+            let Some(job_id) = req_str(&args, "jobId") else {
+                return tool_err("invalid_request", "missing required string field `jobId`");
+            };
+            let target = match parse_opt_non_empty_str(&args, "target") {
+                Ok(t) => t,
+                Err(msg) => return tool_err("invalid_request", msg),
+            };
+            let after_seq = opt_u64(&args, "afterSeq");
+            let wait_ms = opt_u64(&args, "waitMs").unwrap_or(0);
+            let limit = match opt_positive_usize(&args, "limit") {
+                Ok(l) => l,
+                Err(msg) => return tool_err("invalid_request", msg),
+            };
+            match state
+                .call_host_typed::<PluginJobStatusDto>(ControlCommand::PollPluginJob {
+                    target,
+                    job_id,
+                    after_seq,
+                    wait_ms,
+                    limit,
+                })
+                .await
+            {
+                Ok(status) => tool_ok(serde_json::to_value(status).unwrap_or(Value::Null)),
+                Err(e) => tool_err_host(e),
+            }
+        }
+        "cancel_plugin_job" => {
+            let Some(job_id) = req_str(&args, "jobId") else {
+                return tool_err("invalid_request", "missing required string field `jobId`");
+            };
+            let target = match parse_opt_non_empty_str(&args, "target") {
+                Ok(t) => t,
+                Err(msg) => return tool_err("invalid_request", msg),
+            };
+            match state
+                .call_host(ControlCommand::CancelPluginJob { target, job_id })
+                .await
+            {
+                Ok(val) => tool_ok(val),
+                Err(e) => tool_err_host(e),
+            }
+        }
+        "upload_artifact" => {
+            let Some(file_path) = req_str(&args, "filePath") else {
+                return tool_err("invalid_request", "missing required string field `filePath`");
+            };
+            let target = match parse_opt_non_empty_str(&args, "target") {
+                Ok(t) => t,
+                Err(msg) => return tool_err("invalid_request", msg),
+            };
+            let name = match parse_opt_non_empty_str(&args, "name") {
+                Ok(n) => n,
+                Err(msg) => return tool_err("invalid_request", msg),
+            };
+            let ttl_ms = match opt_positive_u64(&args, "ttlMs") {
+                Ok(t) => t,
+                Err(msg) => return tool_err("invalid_request", msg),
+            };
+            match upload_artifact_streaming(state, Path::new(&file_path), target, name, ttl_ms)
+                .await
+            {
+                Ok(info) => tool_ok(serde_json::to_value(info).unwrap_or(Value::Null)),
+                Err(e) => tool_err_host(e),
+            }
+        }
         _ => tool_err("unknown_tool", format!("Unknown tool: {name}")),
     }
+}
+
+async fn invoke_plugin_tool_mcp(state: &mut McpState, args: Value) -> Value {
+    let Some(plugin_id) = req_str(&args, "pluginId") else {
+        return tool_err("invalid_request", "missing required string field `pluginId`");
+    };
+    let Some(tool) = req_str(&args, "tool") else {
+        return tool_err("invalid_request", "missing required string field `tool`");
+    };
+    let target = match parse_opt_non_empty_str(&args, "target") {
+        Ok(t) => t,
+        Err(msg) => return tool_err("invalid_request", msg),
+    };
+    let tool_args = args
+        .get("args")
+        .filter(|v| !v.is_null())
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let artifacts = match args.get("artifacts").filter(|v| !v.is_null()) {
+        Some(raw) => match parse_string_array(raw, "artifacts") {
+            Ok(list) if !list.is_empty() => Some(list),
+            Ok(_) => None,
+            Err(msg) => return tool_err("invalid_request", msg),
+        },
+        None => None,
+    };
+    let timeout_ms = match opt_positive_u64(&args, "timeoutMs") {
+        Ok(t) => t,
+        Err(msg) => return tool_err("invalid_request", msg),
+    };
+    let wait = opt_bool(&args, "wait").unwrap_or(false);
+
+    let res: PluginToolInvokeResultDto = match state
+        .call_host_typed(ControlCommand::InvokePluginTool {
+            target: target.clone(),
+            plugin_id,
+            tool,
+            args: tool_args,
+            artifacts,
+            timeout_ms,
+        })
+        .await
+    {
+        Ok(res) => res,
+        Err(e) => return tool_err_host(e),
+    };
+
+    if res.mode != "job" {
+        return tool_ok(serde_json::to_value(res).unwrap_or(Value::Null));
+    }
+
+    let Some(job_id) = res
+        .job_id
+        .clone()
+        .or_else(|| res.status.as_ref().map(|s| s.job_id.clone()))
+    else {
+        return tool_err("protocol_mismatch", "job mode response missing `jobId`");
+    };
+
+    if !wait {
+        return tool_ok(json!({
+            "mode": "job",
+            "jobId": job_id,
+            "status": res.status,
+        }));
+    }
+
+    let wait_budget_ms = timeout_ms.unwrap_or(DEFAULT_PLUGIN_JOB_WAIT_MS);
+    let deadline = Instant::now() + Duration::from_millis(wait_budget_ms);
+    let mut accumulated_events: Vec<PluginJobEventDto> = Vec::new();
+    let mut cursor: Option<u64> = None;
+    let mut last_status: Option<PluginJobStatusDto> = res.status;
+
+    if let Some(status) = last_status.as_mut() {
+        accumulated_events.extend(status.events.iter().cloned());
+        cursor = Some(status.next_seq);
+        if is_terminal_job_state(&status.state) {
+            status.events = accumulated_events;
+            return format_terminal_job_for_mcp(status);
+        }
+    }
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            let payload = json!({
+                "jobId": job_id,
+                "timedOut": true,
+                "status": last_status,
+                "events": accumulated_events,
+            });
+            return tool_payload_with_error(payload, true);
+        }
+        let remaining_ms = u64::try_from(deadline.saturating_duration_since(now).as_millis())
+            .unwrap_or(MAX_POLL_MS)
+            .max(1);
+        let poll_wait_ms = remaining_ms.min(MAX_POLL_MS);
+
+        let mut status: PluginJobStatusDto = match state
+            .call_host_typed(ControlCommand::PollPluginJob {
+                target: target.clone(),
+                job_id: job_id.clone(),
+                after_seq: cursor,
+                wait_ms: poll_wait_ms,
+                limit: Some(100),
+            })
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => return tool_err_host(e),
+        };
+
+        cursor = Some(status.next_seq);
+        accumulated_events.extend(status.events.iter().cloned());
+
+        if is_terminal_job_state(&status.state) {
+            status.events = accumulated_events;
+            return format_terminal_job_for_mcp(&status);
+        }
+        last_status = Some(status);
+    }
+}
+
+fn format_terminal_job_for_mcp(status: &PluginJobStatusDto) -> Value {
+    let val = serde_json::to_value(status).unwrap_or(Value::Null);
+    let failed = status.state != "completed";
+    tool_payload_with_error(val, failed)
+}
+
+fn tool_payload_with_error(payload: Value, is_error: bool) -> Value {
+    let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "isError": is_error,
+    })
+}
+
+async fn execute_dynamic_tool(
+    state: &mut McpState,
+    route: DynamicToolRoute,
+    mut args: Value,
+) -> Value {
+    let mut artifacts: Option<Vec<String>> = None;
+    if let Some(obj) = args.as_object_mut() {
+        if let Some(raw_artifacts) = obj.remove("artifacts") {
+            if !raw_artifacts.is_null() {
+                match parse_string_array(&raw_artifacts, "artifacts") {
+                    Ok(list) if !list.is_empty() => artifacts = Some(list),
+                    Ok(_) => {}
+                    Err(msg) => return tool_err("invalid_request", msg),
+                }
+            }
+        }
+    }
+
+    match state
+        .call_host_typed::<PluginToolInvokeResultDto>(ControlCommand::InvokePluginTool {
+            target: route.target,
+            plugin_id: route.plugin_id,
+            tool: route.tool,
+            args,
+            artifacts,
+            timeout_ms: None,
+        })
+        .await
+    {
+        Ok(res) => tool_ok(serde_json::to_value(res).unwrap_or(Value::Null)),
+        Err(e) => tool_err_host(e),
+    }
+}
+
+async fn list_all_tools(state: &mut McpState) -> Vec<Value> {
+    let mut tools = tool_definitions();
+    if let Ok(dynamic_defs) = refresh_dynamic_tools(state).await {
+        tools.extend(dynamic_defs);
+    }
+    tools
+}
+
+async fn refresh_dynamic_tools(state: &mut McpState) -> Result<Vec<Value>, HostError> {
+    let raw = match state.call_host(ControlCommand::ListPluginTools).await {
+        Ok(val) => val,
+        Err(err) => {
+            state.dynamic_tools.clear();
+            state.dynamic_tools_loaded = false;
+            return Err(err);
+        }
+    };
+    let descriptors = match parse_plugin_tools_value(raw) {
+        Ok(list) => list,
+        Err(err) => {
+            state.dynamic_tools.clear();
+            state.dynamic_tools_loaded = false;
+            return Err(err);
+        }
+    };
+
+    let mut used_names: HashSet<String> = tool_definitions()
+        .into_iter()
+        .filter_map(|def| def.get("name").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+
+    let mut routes = HashMap::with_capacity(descriptors.len());
+    let mut defs = Vec::with_capacity(descriptors.len());
+
+    for desc in descriptors {
+        let mcp_name = build_unique_mcp_tool_name(&desc, &mut used_names);
+        let route_target = if desc.host == "local" || desc.host.is_empty() {
+            None
+        } else {
+            Some(desc.host.clone())
+        };
+        routes.insert(
+            mcp_name.clone(),
+            DynamicToolRoute {
+                target: route_target,
+                plugin_id: desc.plugin_id.clone(),
+                tool: desc.tool.clone(),
+                mode: desc.mode.clone(),
+            },
+        );
+        let description = if desc.description.is_empty() {
+            format!("[{}] {} ({}, {})", desc.host, desc.plugin_name, desc.access, desc.mode)
+        } else {
+            format!(
+                "[{}] {} ({}, {}): {}",
+                desc.host, desc.plugin_name, desc.access, desc.mode, desc.description
+            )
+        };
+        let input_schema = enrich_plugin_schema(&desc.input_schema, desc.accepts_artifacts);
+        defs.push(json!({
+            "name": mcp_name,
+            "description": description,
+            "inputSchema": input_schema,
+        }));
+    }
+
+    state.dynamic_tools = routes;
+    state.dynamic_tools_loaded = true;
+    Ok(defs)
+}
+
+fn build_unique_mcp_tool_name(
+    desc: &PluginToolDescriptorDto,
+    used: &mut HashSet<String>,
+) -> String {
+    let prefix = if desc.host == "local" || desc.host.is_empty() {
+        "plugin_".to_owned()
+    } else if let Some(profile) = desc.host.strip_prefix("remote::") {
+        format!("remote_{}_", sanitize_mcp_segment(profile))
+    } else {
+        format!("remote_{}_", sanitize_mcp_segment(&desc.host))
+    };
+
+    let plugin_seg = plugin_id_segment(&desc.plugin_id);
+    let tool_seg = sanitize_mcp_segment(&desc.tool);
+    let raw_base = format!("{prefix}{plugin_seg}_{tool_seg}");
+    let base = truncate_mcp_name(&raw_base, 64);
+
+    if used.insert(base.clone()) {
+        return base;
+    }
+
+    for n in 2usize.. {
+        let suffix = format!("_{n}");
+        let max_prefix = 64usize.saturating_sub(suffix.len());
+        let trimmed = truncate_mcp_name(&raw_base, max_prefix);
+        let candidate = format!("{trimmed}{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded suffix search")
+}
+
+fn plugin_id_segment(plugin_id: &str) -> String {
+    let last = plugin_id
+        .rsplit(['.', '/', ':'])
+        .find(|s| !s.is_empty())
+        .unwrap_or(plugin_id);
+    sanitize_mcp_segment(last)
+}
+
+fn sanitize_mcp_segment(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut prev_underscore = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            if ch == '_' {
+                if !prev_underscore && !out.is_empty() {
+                    out.push('_');
+                }
+                prev_underscore = true;
+            } else {
+                out.push(ch);
+                prev_underscore = false;
+            }
+        } else if !prev_underscore && !out.is_empty() {
+            out.push('_');
+            prev_underscore = true;
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "tool".to_owned()
+    } else {
+        out
+    }
+}
+
+fn truncate_mcp_name(raw: &str, max_len: usize) -> String {
+    let mut s: String = raw.chars().take(max_len).collect();
+    while s.ends_with('_') && s.len() > 1 {
+        s.pop();
+    }
+    if s.is_empty() {
+        "plugin".chars().take(max_len.max(1)).collect()
+    } else {
+        s
+    }
+}
+
+fn enrich_plugin_schema(raw_schema: &Value, accepts_artifacts: bool) -> Value {
+    let mut schema = match raw_schema {
+        Value::Object(map) => Value::Object(map.clone()),
+        _ => json!({ "type": "object", "properties": {} }),
+    };
+    if let Some(obj) = schema.as_object_mut() {
+        if !obj.contains_key("type") {
+            obj.insert("type".into(), json!("object"));
+        }
+        let props = obj
+            .entry("properties".to_owned())
+            .or_insert_with(|| json!({}));
+        if !props.is_object() {
+            *props = json!({});
+        }
+        if accepts_artifacts {
+            if let Some(props_obj) = props.as_object_mut() {
+                props_obj.entry("artifacts".to_owned()).or_insert_with(|| {
+                    json!({
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional list of uploaded artifact IDs from upload_artifact"
+                    })
+                });
+            }
+        }
+    }
+    schema
 }
 
 async fn run_with_serial_loan_tool(state: &mut McpState, args: Value) -> Value {
@@ -908,6 +1384,45 @@ fn opt_bool(args: &Value, key: &str) -> Option<bool> {
     args.get(key).and_then(Value::as_bool)
 }
 
+fn parse_opt_non_empty_str(args: &Value, key: &str) -> Result<Option<String>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if !s.is_empty() => Ok(Some(s.clone())),
+        Some(Value::String(_)) => Err(format!("`{key}` cannot be empty")),
+        Some(_) => Err(format!("`{key}` must be a string")),
+    }
+}
+
+fn opt_positive_u64(args: &Value, key: &str) -> Result<Option<u64>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => match v.as_u64() {
+            Some(n) if n >= 1 => Ok(Some(n)),
+            _ => Err(format!("`{key}` must be a positive integer")),
+        },
+    }
+}
+
+fn opt_positive_usize(args: &Value, key: &str) -> Result<Option<usize>, String> {
+    opt_positive_u64(args, key)?
+        .map(|n| usize::try_from(n).map_err(|_| format!("`{key}` is too large")))
+        .transpose()
+}
+
+fn parse_string_array(raw: &Value, key: &str) -> Result<Vec<String>, String> {
+    let Some(items) = raw.as_array() else {
+        return Err(format!("`{key}` must be an array of strings"));
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(s) = item.as_str().filter(|s| !s.is_empty()) else {
+            return Err(format!("`{key}` elements must be non-empty strings"));
+        };
+        out.push(s.to_owned());
+    }
+    Ok(out)
+}
+
 pub fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
@@ -1105,6 +1620,77 @@ pub fn tool_definitions() -> Vec<Value> {
                 "additionalProperties": false
             }
         }),
+        json!({
+            "name": "list_plugin_tools",
+            "description": "Discover available plugin tools across the local HyperCom host and connected remote hosts (including access level, sync/job mode, artifact support, and input schemas).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "invoke_plugin_tool",
+            "description": "Invoke a plugin tool on the local host or a connected remote host (target: 'local' or 'remote::<profile>'). Async job tools can optionally wait until completion.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pluginId": { "type": "string", "description": "Plugin identifier from list_plugin_tools" },
+                    "tool": { "type": "string", "description": "Tool name within the plugin" },
+                    "target": { "type": "string", "description": "Optional host target ('local' or 'remote::<profile>')" },
+                    "args": { "type": "object", "description": "Tool-specific JSON arguments matching the plugin tool inputSchema" },
+                    "artifacts": { "type": "array", "items": { "type": "string" }, "description": "Optional artifact IDs returned by upload_artifact" },
+                    "timeoutMs": { "type": "integer", "minimum": 1, "description": "Optional invocation/wait timeout in milliseconds (wait defaults to 120000ms)" },
+                    "wait": { "type": "boolean", "description": "If true and the tool returns an async job, poll until completion (default false)" }
+                },
+                "required": ["pluginId", "tool"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "poll_plugin_job",
+            "description": "Poll the status and incremental log/progress events of an async plugin job.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "jobId": { "type": "string", "description": "Job identifier returned by invoke_plugin_tool or a dynamic job tool" },
+                    "target": { "type": "string", "description": "Optional host target ('local' or 'remote::<profile>')" },
+                    "afterSeq": { "type": "integer", "minimum": 0, "description": "Resume reading job events strictly after this sequence cursor" },
+                    "waitMs": { "type": "integer", "minimum": 0, "description": "Optional long-poll wait duration in milliseconds (default 0)" },
+                    "limit": { "type": "integer", "minimum": 1, "description": "Maximum number of events to return" }
+                },
+                "required": ["jobId"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "cancel_plugin_job",
+            "description": "Cancel a running async plugin job.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "jobId": { "type": "string", "description": "Job identifier to cancel" },
+                    "target": { "type": "string", "description": "Optional host target ('local' or 'remote::<profile>')" }
+                },
+                "required": ["jobId"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "upload_artifact",
+            "description": "Stream a local file (such as firmware binary or configuration image) to the local or remote HyperCom host with SHA-256 verification and return an artifactId for plugin tools.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "filePath": { "type": "string", "description": "Path to the local file to upload" },
+                    "target": { "type": "string", "description": "Optional host target ('local' or 'remote::<profile>')" },
+                    "name": { "type": "string", "description": "Optional artifact filename override (defaults to filePath basename)" },
+                    "ttlMs": { "type": "integer", "minimum": 1, "description": "Optional artifact retention TTL in milliseconds" }
+                },
+                "required": ["filePath"],
+                "additionalProperties": false
+            }
+        }),
     ]
 }
 
@@ -1148,7 +1734,7 @@ mod tests {
                 .await
                 .unwrap();
         let tools = list["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 18);
         for tool in tools {
             assert!(tool["name"].as_str().is_some());
             assert!(tool["description"].as_str().is_some());
@@ -1311,5 +1897,396 @@ mod tests {
         let loan_text = loan_res["content"][0]["text"].as_str().unwrap();
         assert!(loan_text.contains("hello-flash"));
         assert!(loan_text.contains("reopened"));
+    }
+
+    fn sample_plugin_descriptors() -> Value {
+        json!([
+            {
+                "host": "local",
+                "pluginId": "com.acme.diag",
+                "pluginName": "Diagnostics",
+                "installGeneration": "gen-1",
+                "tool": "probe",
+                "description": "Probe connected device",
+                "access": "observe",
+                "mode": "sync",
+                "portScoped": true,
+                "acceptsArtifacts": false,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "portId": { "type": "string" }
+                    },
+                    "required": ["portId"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "host": "remote::lab-bench",
+                "hostLabel": "Lab Bench",
+                "pluginId": "org.vendor.stm32-flasher",
+                "pluginName": "STM32 Flasher",
+                "installGeneration": "gen-2",
+                "tool": "flash",
+                "description": "Flash firmware image",
+                "access": "control",
+                "mode": "job",
+                "portScoped": true,
+                "acceptsArtifacts": true,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "portId": { "type": "string" },
+                        "verify": { "type": "boolean" }
+                    },
+                    "required": ["portId"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "host": "local",
+                "pluginId": "com.other.diag",
+                "pluginName": "Other Diag",
+                "installGeneration": "gen-3",
+                "tool": "probe",
+                "description": "Colliding name test",
+                "access": "observe",
+                "mode": "sync",
+                "portScoped": false,
+                "acceptsArtifacts": false,
+                "inputSchema": { "type": "object", "properties": {} }
+            }
+        ])
+    }
+
+    fn is_valid_mcp_tool_name(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= 64
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_list_merges_dynamic_local_and_remote_tools_and_falls_back() {
+        let mut state = McpState::mock(|cmd| match cmd {
+            ControlCommand::ListPluginTools => Ok(sample_plugin_descriptors()),
+            other => Err(HostError::new("invalid_request", format!("unexpected {other:?}"))),
+        });
+
+        let list =
+            handle_raw_line(&mut state, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+                .await
+                .unwrap();
+        let tools = list["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 21); // 18 static + 3 dynamic
+
+        let names: Vec<&str> = tools
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        for name in &names {
+            assert!(is_valid_mcp_tool_name(name), "invalid MCP tool name: {name}");
+        }
+        assert!(names.contains(&"plugin_diag_probe"));
+        assert!(names.contains(&"plugin_diag_probe_2"));
+        assert!(names.contains(&"remote_lab-bench_stm32-flasher_flash"));
+
+        let remote_flash = tools
+            .iter()
+            .find(|t| t["name"] == "remote_lab-bench_stm32-flasher_flash")
+            .unwrap();
+        let desc = remote_flash["description"].as_str().unwrap();
+        assert!(desc.contains("[remote::lab-bench]"));
+        assert!(desc.contains("STM32 Flasher"));
+        assert!(desc.contains("control, job"));
+        assert!(remote_flash["inputSchema"]["properties"]["artifacts"].is_object());
+
+        // Local tool without acceptsArtifacts does not get artifacts injected
+        let local_probe = tools
+            .iter()
+            .find(|t| t["name"] == "plugin_diag_probe")
+            .unwrap();
+        assert!(local_probe["inputSchema"]["properties"]["artifacts"].is_null());
+
+        // Graceful fallback when host is unavailable
+        let mut unavailable = McpState::mock(|_| {
+            Err(HostError::new("host_unavailable", "host is offline"))
+        });
+        let fallback_list = handle_raw_line(
+            &mut unavailable,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fallback_list["result"]["tools"].as_array().unwrap().len(),
+            18
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_plugin_static_dynamic_job_and_artifact_roundtrip() {
+        let dir =
+            std::env::temp_dir().join(format!("hypercomctl-mcp-art-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fw_path = dir.join("app.bin");
+        let fw_bytes = b"HYPERCOM_FIRMWARE_IMAGE_V1";
+        std::fs::write(&fw_path, fw_bytes).unwrap();
+
+        let uploaded = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let uploaded_clone = uploaded.clone();
+        let poll_count = Arc::new(Mutex::new(0u64));
+        let poll_count_clone = poll_count.clone();
+        let recorded = Arc::new(Mutex::new(Vec::<ControlCommand>::new()));
+        let recorded_clone = recorded.clone();
+
+        let mut state = McpState::mock(move |cmd| {
+            recorded_clone.lock().unwrap().push(cmd.clone());
+            match cmd {
+                ControlCommand::ListPluginTools => Ok(sample_plugin_descriptors()),
+                ControlCommand::InvokePluginTool {
+                    target,
+                    plugin_id,
+                    tool,
+                    args,
+                    artifacts,
+                    ..
+                } => {
+                    if plugin_id == "com.acme.diag" && tool == "probe" {
+                        assert_eq!(target, None);
+                        Ok(json!({
+                            "mode": "sync",
+                            "result": { "chip": "STM32H7", "port": args["portId"] }
+                        }))
+                    } else if plugin_id == "org.vendor.stm32-flasher" && tool == "flash" {
+                        assert_eq!(target.as_deref(), Some("remote::lab-bench"));
+                        assert_eq!(artifacts, Some(vec!["art-77".to_owned()]));
+                        Ok(json!({
+                            "mode": "job",
+                            "jobId": "job-flash-1",
+                            "status": {
+                                "jobId": "job-flash-1",
+                                "host": "remote::lab-bench",
+                                "pluginId": "org.vendor.stm32-flasher",
+                                "tool": "flash",
+                                "state": "running",
+                                "latestSeq": 1,
+                                "nextSeq": 2,
+                                "events": [{
+                                    "seq": 1,
+                                    "timestampMs": 1000,
+                                    "kind": "log",
+                                    "message": "erasing flash"
+                                }]
+                            }
+                        }))
+                    } else if plugin_id == "fail-plugin" {
+                        Ok(json!({
+                            "mode": "job",
+                            "jobId": "job-fail-1",
+                            "status": {
+                                "jobId": "job-fail-1",
+                                "host": "local",
+                                "pluginId": "fail-plugin",
+                                "tool": "burn",
+                                "state": "failed",
+                                "error": { "code": "verify_failed", "message": "CRC mismatch" },
+                                "latestSeq": 1,
+                                "nextSeq": 2,
+                                "events": []
+                            }
+                        }))
+                    } else {
+                        Err(HostError::new("invalid_request", "unknown plugin tool"))
+                    }
+                }
+                ControlCommand::PollPluginJob {
+                    target,
+                    job_id,
+                    after_seq,
+                    ..
+                } => {
+                    let mut count = poll_count_clone.lock().unwrap();
+                    *count += 1;
+                    if *count == 1 && after_seq == Some(2) {
+                        Ok(json!({
+                            "jobId": job_id,
+                            "host": target.unwrap_or_else(|| "local".into()),
+                            "pluginId": "org.vendor.stm32-flasher",
+                            "tool": "flash",
+                            "state": "completed",
+                            "result": { "verified": true },
+                            "latestSeq": 2,
+                            "nextSeq": 3,
+                            "events": [{
+                                "seq": 2,
+                                "timestampMs": 1500,
+                                "kind": "progress",
+                                "progress": 1.0,
+                                "message": "done"
+                            }]
+                        }))
+                    } else {
+                        Ok(json!({
+                            "jobId": job_id,
+                            "host": "local",
+                            "pluginId": "org.vendor.stm32-flasher",
+                            "tool": "flash",
+                            "state": "running",
+                            "latestSeq": 1,
+                            "nextSeq": 2,
+                            "events": []
+                        }))
+                    }
+                }
+                ControlCommand::CancelPluginJob { job_id, .. } => Ok(json!({
+                    "jobId": job_id,
+                    "host": "local",
+                    "pluginId": "org.vendor.stm32-flasher",
+                    "tool": "flash",
+                    "state": "cancelled",
+                    "latestSeq": 2,
+                    "nextSeq": 3,
+                    "events": []
+                })),
+                ControlCommand::ArtifactBegin { name, total_bytes, .. } => {
+                    assert_eq!(name, "app.bin");
+                    assert_eq!(total_bytes, Some(fw_bytes.len() as u64));
+                    Ok(json!({ "uploadId": "up-mcp-1" }))
+                }
+                ControlCommand::ArtifactChunk { data_base64, .. } => {
+                    let bytes = STANDARD.decode(data_base64).unwrap();
+                    uploaded_clone.lock().unwrap().extend_from_slice(&bytes);
+                    Ok(json!({ "ok": true }))
+                }
+                ControlCommand::ArtifactCommit { expected_sha256, .. } => {
+                    let sha = expected_sha256.unwrap();
+                    assert_eq!(sha.len(), 64);
+                    Ok(json!({
+                        "artifactId": "art-77",
+                        "name": "app.bin",
+                        "sizeBytes": fw_bytes.len(),
+                        "sha256": sha,
+                        "expiresAtMs": 1_700_000_999_000i64
+                    }))
+                }
+                other => Err(HostError::new("invalid_request", format!("unexpected {other:?}"))),
+            }
+        });
+
+        // 1. Dynamic tool call BEFORE tools/list triggers lazy ListPluginTools refresh
+        let dyn_call = handle_raw_line(
+            &mut state,
+            r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"remote_lab-bench_stm32-flasher_flash","arguments":{"portId":"COM3","verify":true,"artifacts":["art-77"]}}}"#,
+        )
+        .await
+        .unwrap();
+        assert_eq!(dyn_call["result"]["isError"], false);
+        let dyn_body: Value =
+            serde_json::from_str(dyn_call["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(dyn_body["mode"], "job");
+        assert_eq!(dyn_body["jobId"], "job-flash-1");
+
+        // 2. list_plugin_tools static tool
+        let listed = execute_tool(&mut state, "list_plugin_tools", json!({})).await;
+        assert_eq!(listed["isError"], false);
+        let listed_json: Value =
+            serde_json::from_str(listed["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(listed_json["tools"].as_array().unwrap().len(), 3);
+
+        // 3. upload_artifact static tool streaming real temp file
+        let upload_res = execute_tool(
+            &mut state,
+            "upload_artifact",
+            json!({
+                "filePath": fw_path.to_str().unwrap(),
+                "target": "remote::lab-bench"
+            }),
+        )
+        .await;
+        assert_eq!(upload_res["isError"], false);
+        assert_eq!(*uploaded.lock().unwrap(), fw_bytes);
+        let art_json: Value =
+            serde_json::from_str(upload_res["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(art_json["artifactId"], "art-77");
+
+        // 4. invoke_plugin_tool sync
+        let sync_res = execute_tool(
+            &mut state,
+            "invoke_plugin_tool",
+            json!({
+                "pluginId": "com.acme.diag",
+                "tool": "probe",
+                "args": { "portId": "COM9" }
+            }),
+        )
+        .await;
+        assert_eq!(sync_res["isError"], false);
+        assert!(sync_res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("STM32H7"));
+
+        // 5. invoke_plugin_tool job with wait=true polls until completed and merges events
+        let wait_res = execute_tool(
+            &mut state,
+            "invoke_plugin_tool",
+            json!({
+                "pluginId": "org.vendor.stm32-flasher",
+                "tool": "flash",
+                "target": "remote::lab-bench",
+                "args": { "portId": "COM3" },
+                "artifacts": ["art-77"],
+                "wait": true
+            }),
+        )
+        .await;
+        assert_eq!(wait_res["isError"], false);
+        let wait_json: Value =
+            serde_json::from_str(wait_res["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(wait_json["state"], "completed");
+        assert_eq!(wait_json["events"].as_array().unwrap().len(), 2);
+
+        // 6. invoke_plugin_tool failed job returns isError: true
+        let fail_res = execute_tool(
+            &mut state,
+            "invoke_plugin_tool",
+            json!({
+                "pluginId": "fail-plugin",
+                "tool": "burn",
+                "wait": true
+            }),
+        )
+        .await;
+        assert_eq!(fail_res["isError"], true);
+        assert!(fail_res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("verify_failed"));
+
+        // 7. poll_plugin_job and cancel_plugin_job
+        let poll_res = execute_tool(
+            &mut state,
+            "poll_plugin_job",
+            json!({ "jobId": "job-flash-1", "afterSeq": 0 }),
+        )
+        .await;
+        assert_eq!(poll_res["isError"], false);
+
+        let cancel_res = execute_tool(
+            &mut state,
+            "cancel_plugin_job",
+            json!({ "jobId": "job-flash-1" }),
+        )
+        .await;
+        assert_eq!(cancel_res["isError"], false);
+        assert!(cancel_res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("cancelled"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

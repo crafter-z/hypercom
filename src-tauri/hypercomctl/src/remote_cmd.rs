@@ -82,6 +82,7 @@ pub async fn execute(
             ports,
             role,
             allow_loan,
+            device_plugins,
             ttl_secs,
         } => {
             let mut client = connect_target(target).await?;
@@ -91,6 +92,7 @@ pub async fn execute(
                     ports,
                     role: role.to_string(),
                     allow_loan,
+                    device_plugins,
                     ttl_secs,
                 })
                 .await?;
