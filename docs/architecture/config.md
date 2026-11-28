@@ -6,7 +6,7 @@ config.json 实体模型与向前兼容口径、会话快照、6 个 Zustand sto
 
 SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体）的持久化事实来源**。会话快照独立保存在 `session.json`，插件私有 KV 独立保存在 `plugins/<id>/data/state.json`，二者不属于配置导出 bundle。
 
-`AppConfig` 共 **44 个字段 = 43 个非 flatten 字段（含 revision）+ `#[serde(flatten)] entities: Entities`**（整体 `#[serde(rename_all = "camelCase")]`）。`Entities` 是 **9 个 `Vec` 实体数组**；`#[serde(flatten)]` 使这些实体作为 config.json 的**顶层 key**，而非嵌套在 `entities` 对象中。普通字段包含数值、字符串、布尔值和预设波特率数组。
+`AppConfig` 共 **45 个字段 = 44 个非 flatten 字段（含 revision）+ `#[serde(flatten)] entities: Entities`**（整体 `#[serde(rename_all = "camelCase")]`）。`Entities` 是 **9 个 `Vec` 实体数组**；`#[serde(flatten)]` 使这些实体作为 config.json 的**顶层 key**，而非嵌套在 `entities` 对象中。普通字段包含数值、字符串、布尔值、市场源地址和预设波特率数组。
 
 | 实体 | `Entities` 字段 | config.json 顶层 key | 前端对应 |
 |---|---|---|---|
@@ -20,7 +20,7 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 | PortMetaEntry | `port_meta` | `portMeta` | 端口元数据：备注名/隐藏/mode；当前枚举端口的编辑覆盖其条目，未插入设备的条目保留 |
 | PluginConfigEntry | `plugin_configs` | `pluginConfigs` | 插件安装身份 `installGeneration` / 启用态 / 授权（插件私有 KV 独立存放） |
 
-43 个非 flatten 字段与实体数组同层，其中 revision 是保存并发控制元数据，不是可编辑设置。默认值和范围收敛位于 `config/mod.rs`；规则实体 CRUD 位于 `commands/storage.rs`，插件安装、启停和授权另由 `commands/plugin.rs` 管理，不能按普通规则实体写入插件状态。
+44 个非 flatten 字段与实体数组同层，其中 revision 是保存并发控制元数据，不是可编辑设置。默认值和范围收敛位于 `config/mod.rs`；规则实体 CRUD 位于 `commands/storage.rs`，插件安装、启停和授权另由 `commands/plugin.rs` 管理，不能按普通规则实体写入插件状态。
 
 ### 向前兼容与 schema：没有版本字段
 
@@ -77,7 +77,7 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 - `commands/config.rs`（**5 个**）：`get_config` / `set_config` / `update_session_snapshot` / `get_session_snapshot` / `get_config_path`。「恢复默认」**没有**后端命令：内存态由 `useAppStore.resetConfig()` 重置（当前无 UI 调用点），落盘仍走同一条安全快照 `saveConfig`——多一条后端命令只会多一个写路径。
 - `commands/storage.rs`（**20 个**）：6 类带 `id` 实体 × save/load/delete = 18，加整体替换的 `save_port_groups` / `save_port_meta`。这 20 个命令共享 `read_config` / `save_entity` / `delete_entity` 三个助手 + `entity_accessors!` / `impl_entity_id!` 宏生成的访问器（不再是 20 份手抄的「加锁 → 找同 id → 替换/追加 → save」）。命令名 / 参数名 / 返回类型保持不变——前端 `storageService` 编译期依赖它们。
 - CRUD 语义：`save_entity` 按 id upsert，**空 id = 新建**（后端生成 UUID），返回最终 id；`delete_entity` 按 id 删除，**不存在的 id 是无操作**（不报错、不动其它条目、不打乱剩余顺序）；`save_port_groups` / `save_port_meta` 是**整组替换**，且**没有**对应 load 命令——读走 `get_config`（`port_groups` / `port_meta` 随 `AppConfig` 一并返回）。所有 CRUD 的 `ConfigManager::save()` 同样执行触发规则字段归一化，不会绕过 `matchType`/`isRegex` 与端口作用域契约。
-- **注册漂移守卫**：`config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 对比 `lib.rs` 注册与命令定义。当前 **98** 个命令、**13** 个命令域文件（完整清单与每域职责见 [`src-tauri/src/commands/AGENTS.md`](../../src-tauri/src/commands/AGENTS.md)）；系统域 `complete_editor_close` 在主窗确认编辑处理后执行隐藏/退出。
+- **注册漂移守卫**：`config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 对比 `lib.rs` 注册与命令定义。当前 **151** 个命令、**21** 个命令域文件（完整清单与每域职责见 [`src-tauri/src/commands/AGENTS.md`](../../src-tauri/src/commands/AGENTS.md)）；系统域 `complete_editor_close` 在主窗确认编辑处理后执行隐藏/退出。
 
 ## 时间工作区会话描述
 
@@ -170,5 +170,9 @@ Windows 的不可避免 `RunEvent::Exit`（含 tao `WM_ENDSESSION` 路径）不�
 | `diag_logger` | `Arc<DiagLogger>` | 应用自身诊断日志（512KB 轮转、保留 3 份），开关取 `config.diagLogEnabled` |
 | `system_info` | `Arc<Mutex<sysinfo::System>>` | 增量刷新，避免 `new_all` 的每次高开销 |
 | `tool_processes` / `file_send_cancel` / `popouts` | `Mutex<HashMap<..>>` | 外部工具子进程 / 文件发送取消令牌 / 弹窗注册表 |
+| `event_hub` | `Arc<SerialEventHub>` | 串口实时事件环形缓冲与广播中心（CLI / MCP / 远端共享） |
+| `lease_registry` | `Arc<PortLeaseRegistry>` | 显式串口借用租约注册表 |
+| `control_hub` | `Arc<ControlHub>` | 本地 IPC 与远端 TLS 1.3 控制面中心 |
+| `remote_clients` | `Arc<RemoteClientManager>` | 已配对远端主机的连接与事件同步管理器 |
 
 配置到运行期的同步统一由 **`AppState::apply_runtime_config(&AppConfig)`** 完成：使用 `LogSettings::from_config`、`LogManager::apply_settings` 和 `DiagLogger::set_enabled` 应用日志与诊断设置；启动和 `set_config` 共用该入口。

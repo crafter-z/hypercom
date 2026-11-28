@@ -7,9 +7,9 @@
 | 文件 | 责任与装配位置 |
 |---|---|
 | `useAppInit.ts` | `App.tsx` 启动装配：加载配置与会话、恢复分组和端口元数据、初始化规则运行态 |
-| `useSerialPorts.ts` | 端口轮询和 `mergePorts`；`useSimulation.ts` 复用端口映射与合并逻辑 |
+| `useSerialPorts.ts` | 端口轮询和 `mergePorts`（远端端口采用后端状态/波特率/代次/借用信息并保留借用中端口）；`useSimulation.ts` 复用端口映射与合并逻辑 |
 | `useSerialConnection.ts` | React 适配与重连监听租约；严格状态机与插件 `serial.open/close` 共用的 per-port lane 在 `src/utils/serialConnectionRuntime.ts`；`closePort()` 是显式断开 UI 入口 |
-| `useSerialReceive.ts` | `App.tsx` 唯一的主窗 `serial:data` 监听；把 TRX 字节送入 `getRxPipeline()`，TTY 字节送入 `ttyService.feed` |
+| `useSerialReceive.ts` | `App.tsx` 唯一的主窗 `serial:data` / `serial:status` / `serial:tool-loan` / `serial:note` / `serial:external-tx` 监听；把 TRX 字节送入 `getRxPipeline()`，TTY 字节送入 `ttyService.feed`；`remote::` 端口跳过本地触发自动回复 |
 | `useSerialSend.ts` | `sendToPort()`、TRX 回显、TX 统计、发送历史；TTY 走对应服务路径 |
 | `useConfigPersistence.ts` | 普通配置和实体保存的 revision-CAS 队列 |
 | `usePopoutBridge.ts` | 主窗与弹窗的 intent、快照、命令编辑 ACK |

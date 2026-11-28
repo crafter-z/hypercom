@@ -10,7 +10,7 @@
 
 ## 运行与信任边界
 
-- `<config_dir>/plugins/<反向域名 id>/manifest.json` 与 manifest 指定的 `entry` 是插件代码来源；入口为单文件普通脚本，不支持 ESM `import` / `require`。Rust 的 `plugin::PluginManifest::validate` 校验 id、API 主版本、路径及权限声明；启动时宿主读取 manifest，失败即拒绝运行。
+- `<config_dir>/plugins/<反向域名 id>/manifest.json` 与 manifest 指定的 `entry` 是插件代码来源；入口为单文件普通脚本，不支持 ESM `import` / `require`。Rust 的 `plugin::PluginManifest::validate` 校验 id、API 主版本、路径、权限声明、可选 `hostKind`（`workbench` / `host` / `both`）与 `tools`（`PluginToolDecl`：每插件最多 128 个工具，工具名 1–64 字符且仅含 ASCII 字母/数字/`_`/`.`/`-` 并插件内唯一，`description` 非空且 ≤2048 字符，`access` 为 `observe`/`write`/`control`，`mode` 为 `sync`/`job`，`inputSchema` 为 JSON 对象）；启动时宿主读取 manifest，失败即拒绝运行。`KNOWN_PERMISSIONS` 包含 `control:expose`（在设置审阅归入 `external` 分组），用于授权向 `ControlHub` / `hypercomctl` / 已配对远端客户端暴露 `manifest.tools`。
 - 主窗口 `usePluginHost` 在 `ui.configReady` 后同步插件状态；会话绑定 `installGeneration`，身份变化终止旧 Worker。启动失败计数窗口为 10 秒：窗口内累计三次启动失败后尝试持久化禁用并通知，未达阈值时按 500ms × 当前失败次数等待自动重试；`__plugin_ready` 之后的运行时错误只记诊断，不重启、不计数（分级见 [Worker 桥与派发](#worker-桥与派发)）。设置页刷新可重试未运行会话；若禁用状态保存失败，记录错误而不声称持久化成功。弹窗不加载插件宿主。
 - Worker 没有 DOM / `window.__TAURI__`；宿主和插件以 `postMessage` 通讯，宿主在每次 RPC 调用时检查当前安装身份及 `grantedPermissions`。`list_plugins` 在控制面闸门内取得一致的磁盘与配置快照；主窗 `pluginConfigSnapshot` 按后端 `revision` 拒绝迟到的列表和变更响应，防撤权后旧快照复活权限。插件安装与启用是用户信任决策，不是针对恶意主窗口脚本的强沙箱：能在主窗口执行的任意脚本仍可直接调用 Tauri 命令。后端对插件命令另做主窗口来源限制、已启用及权限验证，不把 Worker 中的 `pluginId` 当成不可伪造身份。
 - `shell.execute` 是高风险的主窗 Worker→宿主能力，不注入到视图页面。每次调用复核启用态、安装代次和 `shell:execute` 授权；权限用于用户明确授权能力，不额外设置命令专用并发、输出或参数业务配额围栏；宿主通用 RPC 在途限制仍适用。`program`、`args`、`cwd`、环境和 stdin 按操作系统进程语义传递，插件可显式选择 shell 解释器；禁用、撤权、显式重载、卸载或替换会取消并等待直接子进程，但仅 Worker 崩溃或停止时，宿主可能只丢弃 RPC 回执，不保证取消已启动的原生命令；命令可运行至自身结束、调用方 timeout 或后续用户禁用。任何情况下都不承诺终止进程树或撤销已发生的副作用。
@@ -23,7 +23,9 @@
 - 插件目录权限分开授权：`fs:open-dir` 列目录/读文件/读元数据；推荐的最小 `fs:export-dir` 仅创建/覆盖导出文件并自动创建父目录；兼容保留的 `fs:write-dir` 还允许追加、显式建目录、删除和重命名。目录根只能来自 `plugin_pick_directory` 原生目录选择器（授予任一目录权限即可选择），`grantId` 与插件 ID、`installGeneration` 绑定，展示用 path 不是访问能力。每次操作都重校验启用态、manifest、当前对应权限、安装身份和授权，限制目标为 canonical root + 相对路径，拒绝绝对路径、`..`、链接/重解析点与越界；最小导出不隐式获得读取或破坏性目录操作。授权无 TTL、无数量上限，只存在宿主内存；重启、禁用、全部目录权限撤销、卸载、替换或重载时失效。旧目录 overwrite/append 与导出共用原生路径、权限、身份和 grant 的提交前复核，授权在提交点失效时不报告成功。
 - 新范围/分页读取会记录每个请求实际依赖的 `fs:assets`、`fs:storage`、`fs:open-dir`；撤销某一具体读取能力只取消依赖该能力的请求，仍有其他 read grant 的 session 保留。三种范围读取能力全部撤销时才退休该插件的读取 session；重新授予不会复活已取消请求或旧 cursor。
 - `fs:save` 是独立的任意目录 Save As 最小权限：`fs.saveFile` 每次在原生保存对话框中由用户产生目标，只接受内容与标题/文件名/过滤器提示，不接受插件指定的绝对路径，也不产生可复用目录 grant。`plugin_save_file` 在选择后与写提交前复核身份/授权；取消返回 null，与空内容保存成功不同。`fs.exportFile` / `fs.saveFile` 均接受 UTF-8 文本或完整原始字节，不增加内容业务大小限额、读取权限或隐式 RPC 截止；既有 `fs:write-dir` 与无额外权限的 `ui.panel.export` 保持兼容。
-- `serial:control` 独立于 `serial:send`，仅允许通过共享串口 runtime 打开/关闭白名单内端口，不向 Worker 暴露直接 invoke。`pluginHostApi` 与原生 `plugin_serial_open/close` 都复核安装身份、启用态、manifest/当前权限与端口白名单；关闭使用 `expectedConnectionGeneration` CAS，不将排队旧关闭作用到新连接。`ports.list/status` 走原生权威连接摘要（含代次，无额外控制权限），仅显示 `mode` 优先采用已有宿主 UI metadata，不用过期 store 状态/代次覆盖 native；打开不抢占前端焦点或隐式发送；无通用 RPC 控制期限。授权确认分别说明控制风险、白名单目录导出及每次 Save As 的差异。
+- `serial:control` 独立于 `serial:send`，仅允许通过共享串口 runtime 打开/关闭白名单内端口，或经 `serial.loan`（`plugin_serial_loan_acquire`/`heartbeat`/`release`）显式借用/续期/归还本地非 TTY 串口，不向 Worker 暴露直接 invoke。`plugin_serial_list`、`plugin_serial_status`、`plugin_serial_open`、`plugin_serial_close` 与 `view_runtime::create` 均支持已连接的 `remote::` 远端端口（经 `PortRef::parse` / `RemoteClientManager` 转发，摘要附带 `isRemote`/`remoteRole`/`remoteAllowLoan`），而 `plugin_serial_loan_*`（`validate_plugin_loan_target`）继续拒绝 `remote::` 与 `GIT:` 端口。`pluginHostApi` 与原生 `plugin_serial_open/close/loan_*` 都复核安装身份、启用态、manifest/当前权限与端口白名单；关闭使用 `expectedConnectionGeneration` CAS，不将排队旧关闭作用到新连接；借用绑定 `plugin:<pluginId>:<installGeneration>` 所有者标签与 `connection_bound: true`，禁用、撤掉 `serial:control`、重载、卸载或备份恢复时由 `lease_registry.release_by_owner_prefix` 自动释放。`ports.list/status` 走原生权威连接摘要（含代次，无额外控制权限），仅显示 `mode` 优先采用已有宿主 UI metadata，不用过期 store 状态/代次覆盖 native；打开不抢占前端焦点或隐式发送；无通用 RPC 控制期限。`host.info`（`PLUGIN_HOST_INFO`）向 Worker 提供只读能力探测 `{apiVersion: 1, features: {serialLoan: true, portLease: true, pluginTools: true, remotePorts: true, artifacts: true}}`。授权确认分别说明控制风险、白名单目录导出及每次 Save As 的差异。
+
+- `PluginControlBridge` 生命周期退休：`commands/plugin.rs` 在插件禁用（`set_plugin_enabled`）、撤销网页信任（`set_plugin_trusted_web`）、撤销 `control:expose`（`set_plugin_permissions`）、重载（`reload_plugin`）、卸载（`uninstall_plugin`）及覆盖/升级安装事务中调用 `state.control_hub.plugin_bridge().retire_plugin`，从暴露目录移除该插件工具、拒绝在途同步调用、将运行中的控制面 job 标为 `cancelled` 并通知轮询方，同时关闭该插件正在被远端工作台投影的视图代理并向主窗发送 `control:remote-view-close`。远端工作台通过 `create_projected_plugin_view`（`view_runtime::create_projected`）挂载的投影视图以 `projected: true` 运行，使用设备宿主 `RemoteViewSessionDto` 内联打包资源（`read_view_assets_for_projection` 按单文件上限 `MAX_PROJECTION_ASSET_BYTES` = 16 MiB 读取），仅支持 `isolated` 模式并跳过本地 `config_manager` 校验。
 
 - legacy all-port RX/bytes observer 也按订阅 `observerStart` 截断队列；撤权后重新订阅只接收订阅之后的数据和丢失通知，不能回放授权缺失期间的字节。
 
@@ -92,13 +94,16 @@
 | `plugin_file_read` / `plugin_file_write` | `{pluginId, expectedGeneration, sessionId, requestId, handleId, offset, length/base64}` | 读/写均按 ≤1 MiB 窗口；每次重校验 session、代次和对应 `fs:open`/`fs:save` 权限；迟到或取消结果不交付 |
 | `plugin_file_commit` / `plugin_file_close` | `{pluginId, expectedGeneration, sessionId, requestId, handleId}` / cleanup | commit 在授权复核后发布暂存写目标，成功替换不可回滚；父目录同步失败以 `durabilityWarning` 返回；close 幂等清理 |
 | `write_plugin_asset` | `{id, relPath, content?, base64?}` | 无返回值；`content`（可空）与 `base64`（原始字节）互斥，二者皆缺则报错；仅已授权 `data/` 写入，路径/原子写约束保留，不设内容大小上限 |
-| `plugin_serial_list` | `{pluginId, expectedGeneration}` | 原生权威端口摘要数组，含 connectionGeneration；只要求主窗、启用态和安装身份，无额外 serial:control |
-| `plugin_serial_status` | `{pluginId, expectedGeneration, portId}` | 单端口原生摘要或 null；初始未连接代次为 0，已关闭保留历史成功代次 |
-| `plugin_serial_open` | `{pluginId, expectedGeneration, portId, params?}` | `{port,result:'opened'\|'already-open',connectionGeneration}`；serial:control + 白名单，params 使用 camelCase 子字段，已连接不重开或修改参数 |
-| `plugin_serial_close` | `{pluginId, expectedGeneration, portId, expectedConnectionGeneration}` | `{port,result:'closed'\|'already-closed'}`；serial:control + 白名单 + 原生连接代次 CAS；旧代次不能关闭新会话 |
+| `plugin_serial_list` | `{pluginId, expectedGeneration}` | 原生权威端口摘要数组（含已连接的 `remote::` 端口及 `isRemote`/`remoteRole`/`remoteAllowLoan`），含 connectionGeneration；只要求主窗、启用态和安装身份，无额外 serial:control |
+| `plugin_serial_status` | `{pluginId, expectedGeneration, portId}` | 单端口原生摘要或 null（支持 `remote::` 端口）；初始未连接代次为 0，已关闭保留历史成功代次 |
+| `plugin_serial_open` | `{pluginId, expectedGeneration, portId, params?}` | `{port,result:'opened'\|'already-open',connectionGeneration}`；serial:control + 白名单，支持 `remote::` 端口转发，params 使用 camelCase 子字段，已连接不重开或修改参数 |
+| `plugin_serial_close` | `{pluginId, expectedGeneration, portId, expectedConnectionGeneration}` | `{port,result:'closed'\|'already-closed'}`；serial:control + 白名单 + 原生连接代次 CAS（含 `remote::` 端口）；旧代次不能关闭新会话 |
 | `plugin_serial_task_begin` | `{pluginId, expectedGeneration, portId, connectionGeneration, taskId, source}` | 固定端口/连接代次的字节或文件任务；source 为 bytes 总长度或已选只读文件句柄；返回 `{totalBytes,connected,windowBytes}`，不自动重连 |
 | `plugin_serial_task_step` | `{pluginId, expectedGeneration, portId, taskId, offset, bytes?}` | 单次最多 64 KiB；原生返回 `written|cancelled|disconnected|failed` 与已写字节；IPC 失败后状态为 unknown，禁止自动重发 |
 | `plugin_serial_task_close` | `{pluginId, expectedGeneration, portId, taskId}` | 幂等收尾/释放端口流程独占；取消只影响该任务，迟到回执不能写入新连接代次 |
+| `plugin_serial_loan_acquire` | `{pluginId, expectedGeneration, portId, expectedConnectionGeneration?, reason?, ttlMs?, autoReopen?}` | 需 `serial:control` 与白名单，拒绝 `remote::` 与 `GIT:` 端口；在 `PortLeaseRegistry` 登记 `connection_bound` 租约并返回 `LoanInfoDto` |
+| `plugin_serial_loan_heartbeat` | `{pluginId, expectedGeneration, leaseId, extendTtlMs?}` | 校验租约所有者标签 `plugin:<id>:<gen>`、启用态与 `serial:control`，延长租约 TTL 并返回最新 `LoanInfoDto` |
+| `plugin_serial_loan_release` | `{pluginId, expectedGeneration, leaseId, reopenOverride?}` | 校验所有者标签与权限后归还租约，按 `autoReopen`/`reopenOverride` 尝试恢复串口并返回 `LeaseRecovery` |
 | `plugin_export_file` | `{pluginId, grantId, relPath, content?, base64?}` | `{path,bytesWritten}`；fs:export-dir，仅所选 grant 根 + 相对文件名，UTF-8 文本/字节互斥，按需建父目录并原子覆盖，无 append/remove/rename/read |
 | `plugin_save_file` | `{pluginId, content?, base64?, options}` | `{path,bytesWritten}` 或 null；fs:save，每次原生 Save As，options 仅标题/文件名/过滤器提示，不接受目标路径，取消不写入 |
 | `plugin_pick_directory` | `{pluginId, options}` | `PluginPickedDirectory[]`；options 为 `{title?, multiple?}`。主窗原生目录选择器，校验目录权限与安装代次，canonicalize 后创建 grant；无 TTL、无数量上限 |
@@ -126,7 +131,8 @@
 | `plugin_shell_start` | `{pluginId, expectedGeneration, sessionId, request, options:{stdout?,stderr?}}` | 同一 shell:execute 授权启动单任务；每管道 `pipe` 或 `discard`，无默认总期限/总量业务配额；返回 taskId |
 | `plugin_shell_read` / `plugin_shell_status` | `{..., taskId, stream}` / `{..., taskId, wait}` | 每管道单 reader，逐块最多 16 KiB；status 为 running/cancelling/exited/cancelled/timed-out/failed；stdout/stderr 各自有序 |
 | `plugin_shell_cancel` / `plugin_shell_release` | `{..., taskId}` | cancel 只请求该直接子进程，release 释放任务记录；不终止进程树、不回滚外部副作用 |
-| `create_plugin_view` | `{binding}` | 主 WebView 专用；校验安装/权限/端口及资源后创建独立原生 UI |
+| `create_plugin_view` | `{binding}` | 主 WebView 专用；校验安装/权限/端口（含已连接的 `remote::` 端口）及资源后创建独立原生 UI |
+| `create_projected_plugin_view` | `{binding, session}` | 主 WebView 专用；根据远端宿主返回的 `RemoteViewSessionDto`（内联打包资源）在本地工作台挂载 `projected: true` 的独立隔离视图，跳过本地 `config_manager` 校验 |
 | `update_plugin_view` | `{instanceId, rect, occlusions?, visible, layoutRevision}` | 最新 revision 几何、局部遮挡（≤64 矩形，见[隔离视图](plugin-views.md)）及可见性；按主窗 zoom/DPI 转换并裁剪 |
 | `send_plugin_view_message` | `{instanceId,message}` | 只准 init/state/environment 有界 JSON，状态快照 256 KiB，不接受源代码 |
 | `destroy_plugin_view` | `{instanceId}` | 幂等退休原生路由/控件，迟到消息不能复活 |

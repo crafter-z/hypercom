@@ -7,6 +7,8 @@
 | 能力 | 文件与符号 | 约束 |
 |---|---|---|
 | 端口/标签解析 | `src/stores/useAppStore.ts`：`getTabPortId`、`getActivePortId`、`findSerialTabByPortId` | `TabItem.id` 是工作区 UUID；serial 用 `portId`，plugin 用 `boundPortId`，replay 无端口；不回退 last-port |
+| 远端端口与能力 | `src/utils/portCapabilities.ts`：`getPortCapabilities`、`isRemotePort`、`isRemotePortId`、`parseRemotePortId`、`formatSerialTabTitle` | 统一解析 `remote::<profileId>::<portId>`、角色权限（`observe`/`write`/`control`）与借用状态；组件不自写前缀判断 |
+| 协作控制服务 | `src/services/control.ts`：`controlService` | 封装本地 IPC 状态、租约回收与 TLS 1.3 远端宿主/客户端配对命令 |
 | pane tree | `src/utils/paneTree.ts`：`newPaneId`、`findLeafById`、`findLeafByTabId`、`findParentBranch`、`findBranchById`、`collectLeaves`、`countLeaves`、`pruneTree` | 纯函数；store、拖拽和恢复共用 |
 | 配置写入 | `src/utils/configWriteQueue.ts`：`enqueueConfigWrite`；`src/hooks/useConfigPersistence.ts`：`saveConfig` | 串行写入、revision CAS；成功后才推进基线 |
 | 联动更新检查 | `src/utils/pluginUpdateService.ts`：`runPluginAutoCheck`、`runPluginManualCheck`、`shouldCheckPluginUpdates`、`pluginUpdateTiming`；`src/utils/updateService.ts`：`runAutoCheck`、`manualCheck`、`shouldAutoCheck`、`updateTiming`；`src/hooks/useAutoUpdate.ts`：`useAutoUpdate`；`src/hooks/useConfigPersistence.ts`：`loadConfig`、`saveConfig` | 插件更新只通知不安装；插件记账独立；后台检查以已提交市场源为准 |
@@ -30,7 +32,8 @@
 | 插件宿主 | `src/hooks/usePlugins.ts`：`usePluginHost`；`src/utils/pluginHost.ts`；`pluginObserver.ts`；`pluginBytesObserver.ts` | 每次 RPC 复核安装身份、启用态和权限 |
 | 插件文件 raw 服务 | [`services/pluginFs.ts`](../../src/services/pluginFs.ts)：`pluginFsService`、`decodePluginFsFrame`；[`pluginHostApi.ts`](../../src/utils/pluginHostApi.ts)：`executeHostApi` | 范围/批量严格 raw ArrayBuffer + HCFR frame，控制元数据允许 JSON；单 range 4 MiB、批量 64 项/8 MiB；分页默认 256/最多 1000，不改变旧全文件 API |
 | 插件文件会话与交付 | [`utils/pluginFs.ts`](../../src/utils/pluginFs.ts)：`PluginFsContext`、`attachPluginFsLease`、`releasePluginFsResultWithRetry`、`pluginFsTransferables`；[`pluginHost.ts`](../../src/utils/pluginHost.ts)：`PluginSession`；[`pluginBridge.ts`](../../src/utils/pluginBridge.ts) | 根 Worker epoch 绑定、native 懒 open、signal 显式取消；新 FS 独立 8 槽，取消绕普通槽但有界；postMessage transfer 成功/失败/放弃后释放 native 字节 lease，不等 Worker ACK、不声称全链零拷贝 |
-| 插件串口控制 | `src/utils/serialPlugin.ts`：`executePluginSerialOpen`、`executePluginSerialClose`；`src/utils/serialConnectionRuntime.ts`：`openSerialConnection`、`closeSerialConnection`；`src/services/serial.ts`：`pluginSerialOpen`、`pluginSerialClose`、`pluginSerialList`、`pluginSerialStatus` | `serial:control` 独立授权；与用户/重连共用 per-port lane；白名单、安装身份及 connectionGeneration CAS；查询走原生权威摘要，控制无隐式 RPC 期限 |
+| 插件串口控制与借用 | `src/utils/serialPlugin.ts`：`executePluginSerialOpen`、`executePluginSerialClose`、`executePluginSerialLoanAcquire`、`executePluginSerialLoanHeartbeat`、`executePluginSerialLoanRelease`；`src/utils/serialConnectionRuntime.ts`：`openSerialConnection`、`closeSerialConnection`；`src/services/serial.ts`：`pluginSerialOpen`、`pluginSerialClose`、`pluginSerialList`、`pluginSerialStatus`；`src/services/plugin.ts`：`pluginSerialLoanAcquire`、`pluginSerialLoanHeartbeat`、`pluginSerialLoanRelease` | `serial:control` 独立授权；open/close 与用户/重连共用 per-port lane；loan 仅限本地非 TTY 端口且绑定 `connection_bound` 租约；查询走原生权威摘要 |
+| 插件能力描述 | `src/utils/pluginHostInfo.ts`：`PLUGIN_HOST_INFO`、`PLUGIN_HOST_API_VERSION` | Worker `host.info` 只读能力探测，声明 `serialLoan` 与 `portLease` |
 | 插件最小文件保存 | `src/utils/pluginHostApi.ts`：`executeHostApi`；`src/services/file.ts`：`exportPluginFile`、`savePluginFile` | `fs.exportFile` 需 `fs:export-dir` + 用户所选目录 grant + 相对路径；`fs.saveFile` 需 `fs:save` 且每次原生 Save As；均不隐式授予读取/删除/重命名，不替换旧 `fs:write-dir` 或 `ui.panel.export` |
 | 插件命令执行 | `src/utils/pluginShell.ts`：`executePluginShell`；`src-tauri/src/commands/plugin_shell.rs`：`plugin_shell_execute` | `shell:execute` 一次性授权；按 OS 进程语义传递 program/args/cwd/env/stdin，状态变更终止直接子进程 |
 | 插件配置快照 | `src/utils/pluginConfigSnapshot.ts`：`syncPluginListSnapshot`、`syncStorePluginConfigs` | 后端 revision 单调；旧快照不可恢复权限 |
@@ -75,6 +78,8 @@
 | 兼容资产 IO | [`plugin.rs`](../../src-tauri/src/commands/plugin.rs)：`read_asset_payload`、`read_plugin_asset_raw`、`legacy_file_authority`、`PreparedAssetWrite`、`asset_write_queue`；[`plugin.ts`](../../src/services/plugin.ts)：`pluginService.readPluginAssetBytes` | 旧全文件无业务大小上限，binary 仅 raw unsupported 回退；短 gate 仅取读取准入快照，打开/读取/编码在锁外且 permit 随实际阻塞任务持有；temp 锁外写/fsync 后短 gate 复核提交，同插件写串行；生命周期事务仍串行 |
 | 插件市场协议 | `src-tauri/src/plugin/marketplace.rs`：`parse_index`、`parse_description`、`metadata_matches`；`src-tauri/src/commands/plugin_marketplace.rs`：`fetch_plugin_marketplace`、`check_plugin_updates`、`install_marketplace_plugin` | 索引只保存 metadata URL；描述携带 manifest/downloadUrl；远程安装复用插件事务并绑定期望 id/version/generation |
 | 原生插件视图 | `src-tauri/src/plugin/view_runtime/`：`mod.rs`、`resources.rs`、`windows.rs`、`sdk.js` | 身份、资源、Windows Wry child 和视图 SDK 分层 |
+| 协作协议与 CLI/MCP | `src-tauri/hypercom-protocol/src/`：`ControlCommand`、`PortRef`、`Authority`、`ProfileStore`、`AsyncControlClient`、`ExpectMatcher`；`src-tauri/hypercomctl/src/`：`args.rs`、`mcp.rs`、`loan_cmd.rs`、`remote_cmd.rs` | 线协议、本地 IPC / PIN 校验 TLS 1.3 与 stdio MCP 工具（13 项）的共享实现 |
+| 宿主控制面与租约 | `src-tauri/src/control/`：`ControlHub`；`src-tauri/src/remote_client/mod.rs`：`RemoteClientManager`；`src-tauri/src/serial/event_hub.rs`：`SerialEventHub`；`src-tauri/src/serial/lease.rs`：`PortLeaseRegistry`；`src-tauri/src/serial/managed_loan.rs`：`ManagedPortLoan`；`src-tauri/src/commands/control.rs` | 统一控制分派、远端双向同步、`PortRef` 转发、事件环形缓冲与独占借用仲裁 |
 | 更新网络 | `src-tauri/src/update_network.rs`、`src-tauri/src/commands/update.rs` | 代理策略与更新检查/下载/安装命令分离 |
 
 ## 相关局部指南

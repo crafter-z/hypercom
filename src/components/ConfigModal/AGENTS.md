@@ -16,6 +16,7 @@
 | `pages/HighlightSettings.tsx` / `pages/CommandSettings.tsx` | 高亮规则、命令集和命令步骤 |
 | `pages/ProtocolSettings.tsx` / `pages/ToolSettings.tsx` / `pages/TriggerSettings.tsx` | 协议模板、外部工具、触发规则 |
 | `pages/PluginSettings.tsx` | 插件安装、升级、卸载、权限、信任和代理 |
+| `pages/CollaborationSettings.tsx` | 本地 IPC/CLI/MCP 状态、串口租约回收、远端 TLS 1.3 宿主与配对配置（归入「扩展与协作」分组） |
 | `editors/HighlightRuleEditor.tsx` | 高亮规则编辑和安全颜色预览 |
 | `editors/SendCmdEditor.tsx` | 发送/参数步骤编辑和等待字段 |
 | `editors/ProtocolTemplateEditor.tsx` | 协议模板字段和配置摘要 |

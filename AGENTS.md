@@ -9,7 +9,8 @@ HyperCom 是由 React/TypeScript 前端、Rust/Tauri 后端组成的串口调试
 - `src/main.tsx`、`src/App.tsx`：前端入口；`App` 装配启动、接收、工具输出等全局生命周期。
 - `src/stores/`：Zustand 状态；`src/hooks/`：React 与 Tauri 生命周期；`src/services/`：Tauri 服务封装；`src/utils/`：共享纯函数和引擎。
 - `src/components/`：主显示区、配置、发送区、侧边栏、弹窗和共享控件。
-- `src-tauri/src/lib.rs`、`src-tauri/src/main.rs`：Tauri 状态、命令注册和启动；`src-tauri/src/commands/`：命令实现。
+- `src-tauri/src/lib.rs`、`src-tauri/src/main.rs`：Tauri 状态、命令注册和启动；`src-tauri/src/commands/`：命令实现；`src-tauri/src/control/`、`src-tauri/src/remote_client/`：本地 IPC 与远端 TLS 1.3 控制面与客户端管理。
+- `src-tauri/hypercom-protocol/`、`src-tauri/hypercomctl/`：共享线协议、安全认证与独立 CLI / stdio MCP Server 二进制。
 - `docs/architecture/`：模块架构；`docs/userwiki/`：用户手册；`.github/workflows/`：CI 与发布流程。
 
 工作区标签类型在 `src/types/index.ts` 的 `TabItem`：serial 标签用 `portId`，plugin 标签用 `boundPortId`，replay 标签没有发送端口；标签 `id` 只是工作区身份。端口身份解析统一使用 `src/stores/useAppStore.ts` 的 `getTabPortId` / `getActivePortId`。
@@ -22,6 +23,9 @@ npm run test:run
 npm run e2e
 npx tsc --noEmit
 npm run test:rust
+npm run test:protocol
+npm run test:cli
+npm run build:cli
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo check --manifest-path src-tauri/Cargo.toml --release --lib
 ```
@@ -38,10 +42,11 @@ Rust 测试统一入口为 `scripts/test-rust.mjs` 的 `runRustTests`：在 `.np
 4. **Rust 命令契约**：命令返回 `Result<T, CommandError>`，错误映射保持领域变体；新增命令同时注册到 `src-tauri/src/lib.rs` 的 `generate_handler!`。不要以 `Result<T, String>` 作为命令错误类型；`std::sync::MutexGuard` 不得跨 `.await`。日志设置统一由 `AppState::apply_runtime_config` 应用，命令层不要给 `LogManager` 包外层 mutex。
 5. **串口发送与生命周期**：TRX 发送统一走 `src/hooks/useSerialSend.ts` 的 `sendToPort`；TTY 键盘、文件发送等旁路必须自行执行连接代次、流程独占和统计边界。RX 由 `src/hooks/useSerialReceive.ts` 的 `useSerialReceive` → `src/utils/rxPipeline.ts` 的 `getRxPipeline` → `src/utils/terminal/viewportManager.ts` 批量写入；主应用只装配一次 `useSerialReceive`，`getRxPipeline` 和 `src/utils/ttyService.ts` 的 `ttyService` 是 webview 生命周期单例，清理端口使用 `disconnect`，不可 `dispose`。
 6. **标签关闭不等于断开**：`src/components/MainDisplay/Pane.tsx` 的 `cleanupClosedTab` 负责关闭清理，批量范围使用 `src/stores/useAppStore.ts` 的 `getClosingTabIds`；显式断开走 `src/hooks/useSerialConnection.ts` 的 `useSerialConnection.closePort`。显示状态和缓冲只在对应标签消费者退休时回收。
-7. **插件能力、身份与快照**：插件系统以提供能力为目标，用户是安全第一责任人；本机命令执行以 `shell:execute` 显式授权为界，不额外施加程序白名单、默认超时或参数/输出业务配额。安装身份是 `installGeneration`，不是安装时间；需要用户确认的启用、授权、重载操作带 `expectedGeneration`。插件配置只接受 `src/utils/pluginConfigSnapshot.ts` 的后端带 revision 快照，旧快照不得恢复权限；插件通知走 `src/stores/useToastStore.ts` 的 `pushPlugin`。
+7. **插件能力、身份与快照**：插件系统以提供能力为目标，用户是安全第一责任人；本机命令执行以 `shell:execute` 显式授权为界，不额外施加程序白名单、默认超时或参数/输出业务配额。安装身份是 `installGeneration`，不是安装时间；需要用户确认的启用、授权、重载操作带 `expectedGeneration`。插件配置只接受 `src/utils/pluginConfigSnapshot.ts` 的后端带 revision 快照，旧快照不得恢复权限；插件通知走 `src/stores/useToastStore.ts` 的 `pushPlugin`。插件串口借用 `serial.loan` 需 `serial:control` 与端口白名单，拒绝 `remote::` 与 `GIT:` 端口，禁用/撤权/重载/卸载时自动释放租约。
 8. **编辑器与界面**：规则页面使用 `src/components/ConfigModal/hooks/useEntityPage.ts` 的 `useEntityPage({ kind })` 会话草稿并显式保存；关闭审批经过共享生命周期和 `complete_editor_close`。React 组件定义在模块级；终端纵向 flex 链每层保留 `min-height: 0`。
 9. **国际化与未信任颜色**：`src/i18n.ts` 的 zh-CN/en-US 保持键集合、顺序和占位符一致，协议词不翻译。进入 HTML style 的规则颜色必须经 `src/utils/cssColor.ts` 的 `safeCssColor`。
 10. **先查复用索引**：跨模块改动先看 [`docs/architecture/code-map.md`](docs/architecture/code-map.md)，禁止重复实现 pane tree、解码、HEX、边界、缩放或顺序调度逻辑。
+11. **远端端口与借用能力门控**：远端端口使用 `hypercom_protocol::PortRef`（`remote::<profileId>::<portId>`），前端统一用 `src/utils/portCapabilities.ts` 的 `getPortCapabilities` / `isRemotePortId` 解析角色（`observe` / `write` / `control`）与借用态，后端由 `ControlHub`（`Actor::check_access`）与 `PortLeaseRegistry` 强制仲裁；组件不得绕过门控或向 `remote::` 端口触发本地自动回复/本地文件发送。
 
 ## 易错契约
 
@@ -59,6 +64,7 @@ Rust 测试统一入口为 `scripts/test-rust.mjs` 的 `runRustTests`：在 `.np
 | store、hook、配置保存 | [`src/stores/AGENTS.md`](src/stores/AGENTS.md)、[`src/hooks/AGENTS.md`](src/hooks/AGENTS.md)、[`docs/architecture/config.md`](docs/architecture/config.md) |
 | Tauri 命令 | [`src-tauri/src/commands/AGENTS.md`](src-tauri/src/commands/AGENTS.md)、[`docs/architecture/errors.md`](docs/architecture/errors.md) |
 | 串口与参数 | [`docs/architecture/serial.md`](docs/architecture/serial.md) |
+| 协作控制、CLI/MCP 与远程串口 | [`docs/architecture/collaboration.md`](docs/architecture/collaboration.md) |
 | TRX 终端与时间联动 | [`docs/architecture/terminal.md`](docs/architecture/terminal.md)、[`src/utils/terminal/AGENTS.md`](src/utils/terminal/AGENTS.md)、[`docs/architecture/timeline.md`](docs/architecture/timeline.md) |
 | TTY、发送、循环、触发、文件 | [`docs/architecture/tty.md`](docs/architecture/tty.md)、[`docs/architecture/transmission.md`](docs/architecture/transmission.md)、[`src/components/OperationPanel/AGENTS.md`](src/components/OperationPanel/AGENTS.md) |
 | 日志、更新、发布 | [`docs/architecture/logging.md`](docs/architecture/logging.md)、[`docs/architecture/update.md`](docs/architecture/update.md)、[`docs/architecture/release.md`](docs/architecture/release.md) |

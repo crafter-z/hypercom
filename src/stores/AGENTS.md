@@ -6,7 +6,7 @@ Zustand 状态按领域拆分；组件和 hook 必须用 selector 订阅，回�
 
 | 文件 | 负责 |
 |---|---|
-| `useAppStore.ts` | 端口、分组、标签、`paneTree`、配置基线与普通设置草稿；`getTabPortId` / `getActivePortId` 解析发送端口，`getClosingTabIds` 统一关闭范围 |
+| `useAppStore.ts` | 端口（含远端 `remote::` 端口元信息与 `PortLoanInfo`）、分组、标签、`paneTree`、配置基线与普通设置草稿；`getTabPortId` / `getActivePortId` 解析发送端口，`getClosingTabIds` 统一关闭范围 |
 | `useSystemStore.ts` | `systemStatus`、`trafficStats`、`simulationMode`、`ui` 等高频运行态 |
 | `useOperationStore.ts` | 串口参数、发送输入和按端口的循环运行态；不放显示字段或全局循环间隔 |
 | `useTerminalStore.ts` | 按端口的显示设置：滚动锁、时间戳、格式、编码、ASCII 噪声可见性、软换行、连接时间；行缓冲在 `src/utils/terminal/viewportManager.ts` |

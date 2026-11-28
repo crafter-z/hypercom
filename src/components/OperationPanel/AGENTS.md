@@ -21,6 +21,7 @@
 - 串口参数字段使用 `useOperationStore` 的无前缀名称；显示格式、编码、滚动锁和时间戳属于 `useTerminalStore`，普通 Enter 设置属于 `useAppStore.config`。
 - TRX 的快捷发送、循环、触发、插件和弹窗发送统一走 `sendToPort`；入口保持端口可发送、连接代次、RX-before-TX、回显、TX 统计和历史契约。TTY 显式命令走 `ttyService.sendData`，键盘走 `ttyService.send`，不做本地 TX 回显但仍保持有序写入、代次、流程独占和统计边界。
 - 发送前必须 `getRxPipeline().flushBeforeSend(portId)`，不能让排队 RX 越过 TX 回显。文件发送和 TTY 键盘绕过 `sendToPort` 时必须自行执行同一流程独占守卫。
+- 远端端口（`remote::`）与已借出端口的功能门控统一由 `src/utils/portCapabilities.ts` 与端口字段推导：`observe` 禁用发送与本地控制，`write` 允许发送但禁用打开/关闭/改参/DTR/RTS，远端端口禁用本地文件发送，已借出端口暂停写入与控制。
 - `useCyclicSend` 在启动时固定目标端口、已提交命令集、排序结果和重复策略；焦点、草稿或中途保存不改当前运行。步骤等待由 `delay` 表达，轮末使用 `loopDelay`，重复次数来自命令集；不要新建全局间隔字段或独立定时器链。
 - 增强流程（含非 `send` 步骤）运行时通过 `src/utils/flowRuntime.ts` 独占端口；流程执行发送使用 `origin: 'flow'`，用户发送、文件和 TTY 输入必须拒绝被占用端口。停止时保留独占直到在飞操作结束。
 - HEX 输入和转换只使用 `src/utils/hexUtils.ts`、`src/utils/hexFormat.ts` 与 `src/utils/sendUtils.ts` 适配；忽略空白后必须偶数位且全为十六进制字符，非法输入显示错误并禁止发送，不补零。HEX 模式不追加文本行尾，切回文本时保留非法原文。

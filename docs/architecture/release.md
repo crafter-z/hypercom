@@ -47,6 +47,7 @@ stable 的 `finalize` 不自动 Publish；preview 的 `finalize` 在门禁成功
 - macOS 当前未启用自动更新，`verify-release` 仍可检查其清单资产完整性。
 - updater 安装前必须验证签名；公钥变更需要兼容旧客户端的过渡版本，否则旧客户端无法原地更新。
 - 自动化质量门、签名清单和 Windows 原生 smoke 不等于最终安装包验收。插件 Worker/CSP、原生隔离视图、文件选择器、权限和跨平台行为需在目标平台安装包上单独确认，边界见 [`plugins.md`](plugins.md) 与 [`plugin-views.md`](plugin-views.md)。
+- 协作控制面使用的独立 CLI/MCP 二进制 `hypercomctl`（`src-tauri/hypercomctl/`）与共享协议 crate `hypercom-protocol`（`src-tauri/hypercom-protocol/`）当前通过 `npm run build:cli`、`npm run test:cli` 与 `npm run test:protocol` 构建和验证，尚未并入 `publish.yml` / `publish-preview.yml` 的桌面安装包资产清单。
 
 ## 相关文件
 

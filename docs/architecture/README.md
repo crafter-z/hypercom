@@ -19,6 +19,7 @@ Tauri 应用壳
 | 文档 | 当前覆盖范围 |
 |---|---|
 | [`serial.md`](serial.md) | 端口枚举、连接生命周期、参数/流控、读写句柄、SIM/GIT:BASH 虚拟端口、外部工具和排序分组 |
+| [`collaboration.md`](collaboration.md) | `hypercom-protocol`、`hypercomctl` CLI/MCP、本地 IPC 与 TLS 1.3 远端宿主/客户端、`PortLeaseRegistry` 与远端能力门控 |
 | [`terminal.md`](terminal.md) | TRX 的 `TerminalBuffer`、`TerminalRenderer`、`viewportManager`、滚动/搜索/编码/高亮与协议字段显示 |
 | [`timeline.md`](timeline.md) | `timelineCoordinator`、preview/commit 定位、调度预算、TRX/插件适配器及只读多轨回放 |
 | [`tty.md`](tty.md) | xterm.js TTY、`ttyService`、TRX/TTY 切换和 GIT:BASH 调试终端 |
@@ -40,7 +41,7 @@ Tauri 应用壳
 - **单一实现**：边界用 `src/utils/bounds.ts` 与 `src-tauri/src/config/mod.rs` 的 `CONFIG_BOUNDS`；文本解码用 `src/utils/lineText.ts`；HEX 输入用 `src/utils/hexUtils.ts`，字节格式化用 `src/utils/hexFormat.ts`；树算法用 `src/utils/paneTree.ts`。
 - **配置保存**：普通设置和实体草稿经 `src/utils/configWriteQueue.ts` 的 `enqueueConfigWrite` 串行写入，并用 revision CAS；成功才推进基线与运行态，失败/冲突/迟到响应不得覆盖新草稿。
 - **命令与事件**：Tauri 命令返回 `Result<T, CommandError>`，新命令必须在 `src-tauri/src/lib.rs` 注册；Rust 的 `FileProgressPayload` 使用 camelCase wire。`serial:data` 传原始字节，接收管线只在 `App` 装配一次。
-- **工作区身份**：`TabItem.id` 是工作区 UUID；串口目标来自 `getTabPortId`/`getActivePortId`，plugin 使用 `boundPortId`，replay 没有发送端口，不做 last-port 回退。
+- **工作区身份**：`TabItem.id` 是工作区 UUID；串口目标来自 `getTabPortId`/`getActivePortId`，plugin 使用 `boundPortId`，replay 没有发送端口，不做 last-port 回退。远端端口使用 `PortRef` 格式 `remote::<profileId>::<portId>`，能力边界由 `src/utils/portCapabilities.ts` 与服务端 `Actor::check_access` 共同约束。
 - **生命周期**：关闭标签不等于断开串口；`Pane.cleanupClosedTab` 只退休显示/输入消费者。显式断开走 `useSerialConnection.closePort`。插件视图按 instance/document/epoch 丢弃迟到消息，二进制走分块与 ACK，不进入实时状态 JSON。
 - **安全输入**：用户颜色经 `safeCssColor`，正则经 `safeRegex`；插件文件/权限/原生视图由宿主重新校验，不能信任 Worker 或页面自报身份。
 
@@ -55,6 +56,7 @@ Tauri 应用壳
 ## 快速导航
 
 - 串口与收发：[`serial.md`](serial.md) → [`transmission.md`](transmission.md)
+- 协作、CLI/MCP 与远端：[`collaboration.md`](collaboration.md)
 - TRX/TTY/回放：[`terminal.md`](terminal.md)、[`tty.md`](tty.md)、[`timeline.md`](timeline.md)
 - 配置与工作区：[`config.md`](config.md)、[`workspace.md`](workspace.md)
 - 插件：[`plugins.md`](plugins.md)、[`plugin-views.md`](plugin-views.md)

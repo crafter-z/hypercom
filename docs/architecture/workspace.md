@@ -104,11 +104,12 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 
 ## 操作面板与侧边栏
 
-- OperationPanel 分区：`OperationPanel.tsx` + `SendSection.tsx` + `ParamsSection.tsx`（旧 `RulesSection.tsx` 已删——命令集选择+循环开关收进 SendSection 紧凑头部 `.op-send-header`，高亮下拉是死控件）。**组件定义在模块级**（父组件内定义子组件会因函数身份变化导致 DOM 销毁/输入失焦）。
+- OperationPanel 分区：`OperationPanel.tsx` + `SendSection.tsx` + `ParamsSection.tsx`（旧 `RulesSection.tsx` 已删——命令集选择+循环开关收进 SendSection 紧凑头部 `.op-send-header`，高亮下拉是死控件）。**组件定义在模块级**（父组件内定义子组件会因函数身份变化导致 DOM 销毁/输入失焦）。远端端口（`remote::`）与已借出端口通过 `src/utils/portCapabilities.ts` 的 `getPortCapabilities` 禁用不可用写/控制/本地文件发送按钮并显示提示。
 - Resize：`OperationPanelResizeHandle.tsx`（共享 `useDragResize`，`mode:'delta'` + `invert`：hook 只报累计拖动位移，组件以拖拽起始高度加位移、clamp [160,600] 后写 `useSystemStore.ui.operationPanelHeight`，默认 280px；开始拖动同时展开折叠的面板）。
 - 串口参数同步签名包含DTR/RTS；仅切换控制线也触发300ms防抖后端更新，不与当前值自比较而误跳过。
 - 布局防线：`.op-section > * { flex-shrink: 0 }`（面板变矮时发送键不被压塌叠压）；`.op-section-params` `max-width: 300px` 封顶（宽窗口参数栏不挤占发送区）。
-- Sidebar：`Sidebar.tsx` + `AliasDialog.tsx`；端口右键菜单分组控制（见 serial.md）。侧边栏宽度由 `App.tsx` 渲染的 `shared/SidebarResizeHandle.tsx` 调整（共享 `useDragResize`，clamp [200,400]，写 `useSystemStore.ui.sidebarWidth`）。
+- Sidebar：`Sidebar.tsx` + `AliasDialog.tsx` + `RemoteHostsSection.tsx`；端口右键菜单分组控制与租约回收（见 serial.md / collaboration.md）。侧边栏宽度由 `App.tsx` 渲染的 `shared/SidebarResizeHandle.tsx` 调整（共享 `useDragResize`，clamp [200,400]，写 `useSystemStore.ui.sidebarWidth`）。
+- ConfigModal 页面分组在 `ConfigModal.tsx` 定义为 `generalDisplay`、`loggingBackup`、`rulesAutomation`、`plugins`（「扩展与协作」，含 `PluginSettings` 与 `CollaborationSettings`）；支持关键字过滤与扩大/紧凑切换。
 - 设置弹窗 ConfigModal 框选文字松手界外不关闭：overlay pointerdown 记录起点是否在弹窗内，click 时起点在弹窗内则忽略关闭。
 - 设置的取消、X、遮罩与 Escape 都走同一离开审批：有未保存草稿时先问保存并关闭 / 放弃并关闭 / 继续编辑，保存失败或保存期间的新编辑不放行；只有选择放弃才丢弃普通设置草稿。已独立持久化的规则基线、分组/端口元数据和插件状态不受取消影响（细节见[配置持久化](config.md)）。
 - **UI 运行态与系统态都在 `useSystemStore`**（`src/stores/useSystemStore.ts`），`useAppStore` **不再持有** `systemStatus` / `trafficStats` / `simulationMode` / `ui.*`：`ui.*`（`sidebarWidth` / `sidebarCollapsed` / `operationPanelHeight` / `isConfigOpen` / `configActiveTab` / `configReady` 等）写入口是 `setUIState` / `toggleConfigModal` / `setConfigActiveTab`，流量回收是 `clearTrafficStats`。这些字段写点密集（5s 系统轮询、每端口 1s 流量 flush、拖拽 resize），与端口/标签数据分开后各自订阅面互不干扰。

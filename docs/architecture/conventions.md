@@ -26,7 +26,7 @@
 
 ### 工作区身份
 
-`src/types/index.ts` 的 `TabItem.id` 是工作区 UUID，不是端口 ID。串口标签使用 `portId`，插件标签使用 `boundPortId`，回放标签没有发送端口。端口解析只用 `src/stores/useAppStore.ts` 的 `getTabPortId` / `getActivePortId`，未绑定插件和回放不回退到 last-port。
+`src/types/index.ts` 的 `TabItem.id` 是工作区 UUID，不是端口 ID。串口标签使用 `portId`，插件标签使用 `boundPortId`，回放标签没有发送端口。端口解析只用 `src/stores/useAppStore.ts` 的 `getTabPortId` / `getActivePortId`，未绑定插件和回放不回退到 last-port。远程端口使用 `PortRef` 编码 `remote::<profileId>::<portId>`，前端能力推导统一使用 `src/utils/portCapabilities.ts` 的 `getPortCapabilities` / `isRemotePortId`。
 
 关闭标签不等于断开串口：`src/components/MainDisplay/Pane.tsx` 的 `cleanupClosedTab` 退休对应显示/输入消费者；显式断开走 `src/hooks/useSerialConnection.ts` 的 `useSerialConnection.closePort`。批量关闭范围由 `getClosingTabIds` 与 store 共用。
 
@@ -52,11 +52,11 @@
 
 配置写入由 `src/utils/configWriteQueue.ts` 的 `enqueueConfigWrite` 串行执行 revision CAS；会话草稿由 `src/utils/entityEditor.ts` 和 `useEntityPage({ kind })` 管理，保存成功才推进 `useRuleStore` 运行态。失败、冲突或迟到响应不得覆盖新草稿。编辑器关闭经 `src/utils/editorLeave.ts`、`src/components/shared/EditorLeaveDialog.tsx` 和 `complete_editor_close` 审批。
 
-`src/i18n.ts` 的 zh-CN 与 en-US 各有 **856 个键**；两侧集合、顺序和插值占位符必须一致，`src/i18n.test.ts` 守卫这些条件。协议词、编码名和单位按代码中的原文使用，不另造翻译键。
+`src/i18n.ts` 的 zh-CN 与 en-US 各有 **1359 个键**；两侧集合、顺序和插值占位符必须一致，`src/i18n.test.ts` 守卫这些条件。协议词、编码名和单位按代码中的原文使用，不另造翻译键。
 
-`src/styles/` 当前有 **28 个 CSS 文件**。其中 19 个由 `src/styles.css` 全局入口按顺序导入，其余由组件按需导入；`base.css` 必须最先加载。新增样式沿用现有入口，不把组件样式堆进 `base.css`。
+`src/styles/` 当前有 **31 个 CSS 文件**。其中 20 个由 `src/styles.css` 全局入口按顺序导入，其余由组件按需导入；`base.css` 必须最先加载。新增样式沿用现有入口，不把组件样式堆进 `base.css`。
 
-保存普通配置使用 `src/hooks/useConfigPersistence.ts` 的 `saveConfig`；实体页不直接修改已提交规则数组。`src-tauri/src/config/mod.rs` 的 `AppConfig` 有 44 个字段，其中 `entities` 是 `#[serde(flatten)]` 的 `Entities`（9 个实体数组）；字段变化时以源码与测试为准。
+保存普通配置使用 `src/hooks/useConfigPersistence.ts` 的 `saveConfig`；实体页不直接修改已提交规则数组。`src-tauri/src/config/mod.rs` 的 `AppConfig` 有 45 个字段，其中 `entities` 是 `#[serde(flatten)]` 的 `Entities`（9 个实体数组）；字段变化时以源码与测试为准。
 
 ## 平台能力
 
@@ -68,7 +68,7 @@
 
 提交格式为 `type(scope): description`；`type` 使用 `feat`、`fix`、`docs`、`style`、`refactor`、`perf`、`test`、`chore`，scope 使用实际受影响域。
 
-按改动范围运行 `npm run build`、`npm run test:run`、`npx tsc --noEmit`、`npm run test:rust`、Clippy 和 release-profile 检查。Playwright 使用 mock IPC；它不证明真实 UART、原生 WebView/CSP 或最终安装包行为。质量门与平台验收边界见 [`release.md`](release.md)。
+按改动范围运行 `npm run build`、`npm run test:run`、`npx tsc --noEmit`、`npm run test:rust`、`npm run test:protocol`、`npm run test:cli`、Clippy 和 release-profile 检查。Playwright 使用 mock IPC；它不证明真实 UART、原生 WebView/CSP 或最终安装包行为。质量门与平台验收边界见 [`release.md`](release.md)。
 
 Rust 库测试由 `scripts/test-rust.mjs` 的 `runRustTests` 启动，仍执行完整的 `cargo test --manifest-path src-tauri/Cargo.toml --lib`，并原样转发额外筛选参数。每次测试在 `.npm-cache/` 下创建独立目录，只向 Cargo 子进程传入该目录作为 `TEMP` / `TMP` / `TMPDIR`，结束或启动失败时清理；不改调用方环境、`CARGO_TARGET_DIR` 或应用运行时行为。Windows 工作区及其产物可能带 Low Mandatory Level 标签，导致测试进程不能写正常完整性级别的系统临时目录；测试临时目录隔离解决这一环境问题，无需修改系统目录权限，也不跳过文件访问断言。入口脚本自身由 `npm run test:rust:runner` 验证。
 
@@ -77,6 +77,7 @@ Rust 库测试由 `scripts/test-rust.mjs` 的 `runRustTests` 启动，仍执行�
 - 架构总索引：[`README.md`](README.md)
 - 配置与状态：[`config.md`](config.md)
 - 终端与收发：[`terminal.md`](terminal.md)、[`transmission.md`](transmission.md)、[`tty.md`](tty.md)
+- 协作控制与远程：[`collaboration.md`](collaboration.md)
 - 工作区与插件：[`workspace.md`](workspace.md)、[`plugins.md`](plugins.md)、[`plugin-views.md`](plugin-views.md)
 - 错误与复用索引：[`errors.md`](errors.md)、[`code-map.md`](code-map.md)
 

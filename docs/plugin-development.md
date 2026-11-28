@@ -10,6 +10,7 @@
 - [权限与作用域](#权限与作用域)
 - [调用 API 与处理事件](#调用-api-与处理事件)
 - [API 参考](#api-参考)
+- [暴露工具给 CLI、MCP 与远端工作台](#暴露工具给-climcp-与远端工作台)
 - [隔离 UI 与工作区标签](#隔离-ui-与工作区标签)
 - [常见功能示例](#常见功能示例)
 - [限制与错误处理](#限制与错误处理)
@@ -107,6 +108,8 @@ ame` | 是 | 非空显示名 |
 | `ui.menuItems` | 否 | 端口菜单数组：`{id, label, target?}`；target 缺省或 port-context 才显示 |
 | `ui.views` | 否 | 视图声明；`mode` 缺省为 `isolated`，显式 `trusted-web` 加载包内 HTML 文档；`worker:false` 表示该可信页不依附 Worker（仅允许 `input:"none"`），见下文 |
 | `requires` | 有视图时必需 | 每个 `ui.views` 项必须声明对应能力：隔离视图 `isolated-tab-view@1`、可信网页 `trusted-web-view@1`；声明 workspace-tab 放置时另需 `plugin-workspace-tabs@1`。未知或重复能力拒绝 |
+| `hostKind` | 否 | 可选声明插件运行宿主定位：`"workbench"`、`"host"` 或 `"both"`；缺省时不限 |
+| `tools` | 否 | 暴露给 `ControlHub` / `hypercomctl` CLI / MCP Server 的工具声明数组（每插件最多 128 项），每项为 `{name, description, access?, mode?, portScoped?, acceptsArtifacts?, inputSchema?}`，配合 `control:expose` 权限使用 |
 | `shell.executableWhitelist` | 否 | 兼容保留字段，不限制 `shell.execute`；也不约束 `shell.openExternal`。当前版本不需要声明它来执行程序 |
 
 按钮与菜单 id 应在插件内唯一，并在代码中按 buttonId 分派；label 由插件作者负责语言，不经过宿主翻译。支持的 icon 名见 `src/components/Sidebar/pluginIcon.tsx`；未识别的名称使用默认插头图标，入门示例使用已支持的 Play。
@@ -120,7 +123,7 @@ manifest 不能超过 1 MiB；包内路径统一使用 `/`。包不应包含符�
 | `terminal:read` | 订阅 TRX 的 rx.line |
 | `rx:bytes` | 订阅包括 TTY 在内的原始 RX 块 |
 | `terminal:write` | 在已打开 TRX 终端写 NOTE 旁注，不发送串口数据 |
-| `serial:control` | **敏感**：打开/关闭串口，受 serial.portWhitelist 约束；与发送分开授权，关闭需绑定观察到的连接代次 |
+| `serial:control` | **敏感**：打开/关闭串口，或显式借用/续期/归还本地非 TTY 串口，受 serial.portWhitelist 约束；与发送分开授权，关闭需绑定观察到的连接代次 |
 | `serial:send` | 向已连接端口发送，仍需通过 serial.portWhitelist；不隐式获得打开/关闭权限 |
 | `fs:assets` | 读取插件自身包内文件，可返回文本或原始二进制 |
 | `fs:storage` | 读取自身 data/ 文件（文本/二进制）及写入文本或原始字节 |
@@ -138,6 +141,7 @@ otify` | 发出受限的非粘滞通知 |
 | `storage` | 通过 get/set 访问专属 JSON KV；只覆盖 data/state.json，不等于整个 data/ 的文件权限 |
 | `ui:view` | 显示声明的隔离页面、发布 JSON 模型及接收本页面交互，不隐含其他权限 |
 | `ui:tabs` | Worker 打开/激活/关闭/改标题/列出自身独立标签；不能管理其他插件或原始串口标签 |
+| `control:expose` | 向本机 `hypercomctl` CLI / MCP Server 或已配对且授予 `device_plugins` 的远端工作台暴露 `manifest.tools` |
 
 `ports.list`、`ports.status`、`host.info`、log 和自身 ui.panel 操作无需声明额外权限，但插件必须已启用。授权在调用时检查；运行中撤权后，旧 API 引用也不能继续使用该能力。RX 事件同样受当前读取权限控制。
 
@@ -190,7 +194,7 @@ otify` | 发出受限的非粘滞通知 |
 - `on(...)` 返回注销函数；不需要订阅时调用它。
 - RX 行和字节回调收到**数组批次**，不是单条记录。
 - 异步回调应返回 Promise（async 函数会自动返回）；桥在本批回调完成后发送 ACK。不要 fire-and-forget 大量任务或在回调里永久等待。
-- 宿主对普通 RPC 的回执期限为 10 秒，Worker 侧留 11 秒等待回执；超时只让该次调用 reject。以下调用等待真实完成、用户、网络或进程，不设通用 RPC 期限：`serial.open`、`serial.close`、`fs.exportFile`、`fs.saveFile`、`fs.read`、`fs.readRange`、`fs.readRanges`、`fs.listDirectoryPage`、`fs.write`、`storage.set`、`fs.openDialog`、`fs.openDirectoryDialog`、`fs.listDirectory`、`fs.readDirectoryFile`、`fs.statDirectoryEntry`、`fs.writeDirectoryFile`、`fs.createDirectory`、`fs.removeDirectoryEntry`、`fs.renameDirectoryEntry`、`ui.panel.export`、`fs.openFile`、`fs.createFile`、`fs.readFileWindow`、`fs.writeFileChunk`、`fs.commitFile`、`shell.execute`、`shell.start`、`shell.read`、`shell.status`、`shell.cancel`、`shell.release` 与全部 `http.*`。`shell.execute` 的业务 `timeoutMs` 由调用方指定（缺省或 `0` 不设截止），不因 RPC 回执期限被隐式改写；`view.sendBinary` 另有 10 分钟传输 RPC 资源期限与逐块 30 秒 ACK 期限。HTTP 的业务期限仍只由请求的 `timeout` 决定；未消费的 stream 会在闲置 60 秒后回收，正在进行的 `read` 不计闲置。
+- 宿主对普通 RPC 的回执期限为 10 秒，Worker 侧留 11 秒等待回执；超时只让该次调用 reject。以下调用等待真实完成、用户、网络或进程，不设通用 RPC 期限：`serial.open`、`serial.close`、`serial.loan.acquire`、`serial.loan.heartbeat`、`serial.loan.release`、`fs.exportFile`、`fs.saveFile`、`fs.read`、`fs.readRange`、`fs.readRanges`、`fs.listDirectoryPage`、`fs.write`、`storage.set`、`fs.openDialog`、`fs.openDirectoryDialog`、`fs.listDirectory`、`fs.readDirectoryFile`、`fs.statDirectoryEntry`、`fs.writeDirectoryFile`、`fs.createDirectory`、`fs.removeDirectoryEntry`、`fs.renameDirectoryEntry`、`ui.panel.export`、`fs.openFile`、`fs.createFile`、`fs.readFileWindow`、`fs.writeFileChunk`、`fs.commitFile`、`view.pickClientArtifact`、`shell.execute`、`shell.start`、`shell.read`、`shell.status`、`shell.cancel`、`shell.release` 与全部 `http.*`。`shell.execute` 的业务 `timeoutMs` 由调用方指定（缺省或 `0` 不设截止），不因 RPC 回执期限被隐式改写；`view.sendBinary` 另有 10 分钟传输 RPC 资源期限与逐块 30 秒 ACK 期限。HTTP 的业务期限仍只由请求的 `timeout` 决定；未消费的 stream 会在闲置 60 秒后回收，正在进行的 `read` 不计闲置。
 - 超时只是回执失败，不表示已经开始的串口写入、文件写入、HTTP 请求或本机进程已被撤销。避免对可能已成功的副作用盲目重试。
 
 ## API 参考
@@ -201,7 +205,7 @@ otify` | 发出受限的非粘滞通知 |
 
 | 调用 | 权限 | 参数与结果 |
 |---|---|---|
-| `api['host.info']()` / `plugin.host.info()` | 无 | 返回 `{apiVersion, features}` 的宿主 Worker 能力描述；当前 `apiVersion` 为 1，`features.serialLoan` 为布尔值 |
+| `api['host.info']()` / `plugin.host.info()` | 无 | 返回 `{apiVersion, features}` 的宿主 Worker 能力描述；当前 `apiVersion` 为 1，`features` 包含 `serialLoan`（`shell.start` 的 `serialLoan`）、`portLease`（`plugin.serial.loan` 显式串口租约）、`pluginTools`（`plugin.tools.register`）、`remotePorts`（端口列表与视图支持 `remote::` 远端端口）与 `artifacts`（Artifact 文件流式传递与 `view.pickClientArtifact`）布尔值 |
 
 `host.info` 返回**稳定的能力字段，不是宿主应用版本字符串**：插件应按 `features` 分支探测可选 API，不要解析或比较宿主版本号（版本号会随发布漂移，同一版本也可能来自不同构建）。`apiVersion` 只是载荷形状版本，新能力以新字段增量加入；插件应检查具体能力字段。该调用只读、无副作用，不启动进程，也不访问串口、文件或网络。
 
@@ -221,10 +225,10 @@ try {
 
 | 调用 | 权限 | 参数与结果 |
 |---|---|---|
-| `api['ports.list']()` | 无 | 原生权威端口摘要数组；成员含 id/name/status/type/mode/connectionGeneration，可含 baudRate；mode 优先保留已有宿主显示模式，连接状态/代次始终来自 native；失败 reject，不回退过期前端连接缓存 |
-| `api['ports.status']({portId})` | 无 | 原生权威单端口摘要；未知且从未成功连接返回 null，曾成功连接但已消失的目标可返回 disconnected + 历史 connectionGeneration |
-| `api['serial.open']({portId, params?})` | serial:control | 打开端口，不创建/激活标签或发送数据；返回 `{port, result:'opened'\|'already-open', connectionGeneration}`。已连接时不重开、不修改现有参数 |
-| `api['serial.close']({portId, expectedConnectionGeneration})` | serial:control | 关闭观察到的连接代次；必填非负安全整数代次，匹配时返回 `{port,result:'closed'\|'already-closed'}`；旧代次拒绝，不误关后来的新连接 |
+| `api['ports.list']()` | 无 | 原生权威端口摘要数组（含本地与已连接的 `remote::` 端口）；成员含 id/name/status/type/mode/connectionGeneration，可含 baudRate 与远端端口的 `isRemote`/`remoteRole`/`remoteAllowLoan`；mode 优先保留已有宿主显示模式，连接状态/代次始终来自 native；失败 reject，不回退过期前端连接缓存 |
+| `api['ports.status']({portId})` | 无 | 原生权威单端口摘要（支持 `remote::` 端口）；未知且从未成功连接返回 null，曾成功连接但已消失的目标可返回 disconnected + 历史 connectionGeneration |
+| `api['serial.open']({portId, params?})` | serial:control | 打开端口（支持已连接的 `remote::` 端口），不创建/激活标签或发送数据；返回 `{port, result:'opened'\|'already-open', connectionGeneration}`。已连接时不重开、不修改现有参数 |
+| `api['serial.close']({portId, expectedConnectionGeneration})` | serial:control | 关闭观察到的连接代次（支持 `remote::` 端口）；必填非负安全整数代次，匹配时返回 `{port,result:'closed'\|'already-closed'}`；旧代次拒绝，不误关后来的新连接 |
 | `api['serial.send']({portId, data, isHex?, lineEnding?})` | serial:send | data 为非空字符串（≤1048576 个 UTF-16 代码单元）；默认文本、不加行尾；返回 `{bytesWritten}`，0 表示没有发送 |
 | `api['terminal.append']({portId, text})` | terminal:write | 非空 text（单次 ≤65536 个 UTF-16 代码单元），写 NOTE，不进入 TX 流量或历史；未打开对应终端显示目标时不保留旁注 |
 
@@ -233,6 +237,35 @@ serial.send 的 HEX 使用偶数个十六进制字符，可含空白，不自动
 `serial.open` 的 `params` 可省略；未提供字段沿用宿主当前端口参数与默认值。允许 `baudRate`（1..4294967295 整数）、`dataBits`（5/6/7/8）、`parity`（`None`/`Even`/`Odd`）、`stopBits`（`One`/`Two`）、`handshake`（`None`/`XonXoff`/`RequestToSend`/`RequestToSendXonXoff`）、布尔 `dtr`/`rts` 以及 TTY `cols`/`rows`（1..65535 整数）；未知字段、非法枚举/数值明确 reject，不静默钳制。虚拟端口仍受宿主开发能力开关约束，控制权限不能绕过它。
 
 打开、关闭与用户连接按钮/自动重连共用每端口顺序 lane；排队后再次检查启用态、安装身份、授权与白名单。连接/权限/过期意图错误 reject，不使用 `serial.send` 的零字节兼容成功语义。`expectedConnectionGeneration` 不是端口所有权证明：用户明确授权后，插件也能关闭白名单内由用户或其他插件打开、且代次仍匹配的连接。不要失败后自动删除代次并盲目重试关闭。
+
+#### 显式串口借用租约（`plugin.serial.loan`）
+
+当插件需要在多步流程中独占本地串口（例如先做自定义准备、再启动外部工具、随后恢复连接），而不仅限于单次 `shell.start({ serialLoan })` 时，可使用 `self.plugin.serial.loan`（可通过 `host.info()` 的 `features.portLease` 探测当前宿主是否支持）：
+
+```js
+const info = await self.plugin.host.info();
+if (info?.features?.portLease) {
+  const lease = await self.plugin.serial.loan.acquire({
+    portId: 'COM9',
+    expectedConnectionGeneration: 12,
+    reason: 'firmware update',
+    ttlMs: 60_000,
+    autoReopen: true,
+  });
+  try {
+    // 借用期间端口已关闭并暂停自动重连；长耗时流程可按需续期：
+    await lease.heartbeat(60_000);
+    // 执行需要独占 OS 串口的操作...
+  } finally {
+    const recovery = await lease.release(); // { state, error? }
+    console.log('reopen state:', recovery.state);
+  }
+}
+```
+
+- **权限与目标范围**：`acquire`、`heartbeat` 与 `release`（以及底层 `api['serial.loan.acquire']` / `heartbeat` / `release`）均要求 `serial:control` 权限及 `serial.portWhitelist` 白名单放行，**仅支持本地真实或 SIM 串口**，明确拒绝 `remote::` 远程端口与 `GIT:` 模拟终端；`reason` 最长 256 字符。
+- **生命周期与回收**：插件租约固定 `connection_bound: true`——插件被禁用、撤掉 `serial:control`、重载、卸载或配置备份恢复时，宿主会自动释放该插件持有的全部租约并按策略恢复串口；TTL 到期同样会被宿主自动回收，用户也可在界面主动强制回收。
+- **返回值与便捷方法**：`acquire` 返回 `{ leaseId, portId, holder, reason?, acquiredAtMs, expiresAtMs?, generation, autoReopen, connectionBound, heartbeat(extendTtlMs?), release(reopenOverride?) }`；也可以直接调用 `self.plugin.serial.loan.heartbeat({ leaseId, extendTtlMs? })` 或 `release({ leaseId, reopenOverride? })`。释放返回 `{ state, error? }`；同一端口不能同时持有两个租约或与 `shell.start({ serialLoan })` / 外部工具冲突。
 
 #### 分块串口任务（字节与已选文件）
 
@@ -480,6 +513,99 @@ seq 不是跨应用会话的持久数据 ID；ts 为毫秒时间戳。不要把 
 
 当前**没有** ports.onChange、rx.getBuffer、包资产目录遍历（`fs.list`）、自定义 events.on/emit 或远程调试协议；`shell.execute` 按上文的 `shell:execute` 权限和操作系统进程语义提供。插件市场提供的是宿主侧索引、更新检查和用户确认后的安装流程，不是 Worker API；声明未来权限不能使未实现接口可用。目录读写只针对用户通过原生选择器选定的目录，不是任意路径 API；插件不能用自报路径绕过选择器。
 
+## 暴露工具给 CLI、MCP 与远端工作台
+
+在 manifest 中声明 `control:expose` 权限、`tools`（`PluginToolDecl` 数组）以及可选 `hostKind`（`"workbench"` / `"host"` / `"both"`）后，Worker 可通过 `self.plugin.tools.register(name, handler)` 向本地 `hypercomctl` CLI / MCP Server 及具备 `device_plugins` 权限的已配对远端工作台暴露能力（可通过 `host.info()` 的 `features.pluginTools` 与 `features.artifacts` 探测当前宿主是否支持）：
+
+### manifest 声明
+
+```json
+{
+  "hostKind": "both",
+  "permissions": ["terminal:read", "serial:control", "shell:execute", "control:expose"],
+  "tools": [
+    {
+      "name": "frames.snapshot",
+      "description": "获取最近解码的协议帧快照",
+      "access": "observe",
+      "mode": "sync",
+      "portScoped": true,
+      "inputSchema": {
+        "type": "object",
+        "properties": { "portId": { "type": "string" }, "limit": { "type": "integer" } },
+        "required": ["portId"]
+      }
+    },
+    {
+      "name": "firmware.flash",
+      "description": "通过上传的固件 Artifact 烧录目标设备",
+      "access": "control",
+      "mode": "job",
+      "portScoped": true,
+      "acceptsArtifacts": true,
+      "inputSchema": {
+        "type": "object",
+        "properties": { "portId": { "type": "string" } },
+        "required": ["portId"]
+      }
+    }
+  ]
+}
+```
+
+- `access` 取 `"observe"`（默认）、`"write"` 或 `"control"`，控制远端工作台调用该工具所需的最低 `RemoteRole`；`portScoped: true` 时若入参包含 `portId`，还会校验远端客户端的端口白名单。
+- `mode` 取 `"sync"`（默认，一次性返回 JSON 结果）或 `"job"`（立即返回 `jobId`，支持增量进度/日志与取消）；`acceptsArtifacts: true` 允许调用方通过 `upload_artifact` / `artifact upload` 预先暂存文件并将已解析的宿主机路径注入 `ctx.artifacts`。
+
+### 同步查询（`mode: "sync"`）
+
+适用于协议解析器等插件向外部 Agent 共享已解码帧、字段快照或统计摘要（`register` 返回注销函数）：
+
+```js
+const unregister = self.plugin.tools.register('frames.snapshot', async (args, ctx) => {
+  // ctx 包含 { artifacts, mode: 'sync' }
+  const frames = getDecodedFrames(args.portId, args.limit ?? 50);
+  return { portId: args.portId, count: frames.length, frames };
+});
+```
+
+### 异步任务与 Artifact 烧录（`mode: "job"`）
+
+适用于烧录器（如 `hypercom-debug-workbench`）、长时间自检或抓包任务。`handler(args, ctx)` 收到的 `ctx` 包含 `{ jobId, signal, artifacts, mode: 'job', emitProgress, emitLog }`：
+
+```js
+self.plugin.tools.register('firmware.flash', async (args, ctx) => {
+  const fw = ctx.artifacts[0]; // { artifactId, name, path, sizeBytes, sha256 }
+  if (!fw) throw new Error('请先通过 upload_artifact 上传固件文件');
+
+  ctx.emitLog(`准备烧录 ${fw.name} (${fw.sizeBytes} bytes, sha256=${fw.sha256})`, 'stdout');
+  ctx.emitProgress(0.1, 'borrowing serial port', { artifactId: fw.artifactId });
+
+  const port = await self.plugin.api['ports.status']({ portId: args.portId });
+  const task = await self.plugin.shell.start(
+    { program: 'openocd', args: ['-c', `program ${fw.path} verify reset exit`] },
+    { serialLoan: { portId: args.portId, expectedConnectionGeneration: port.connectionGeneration } }
+  );
+
+  const onAbort = () => { void task.cancel().catch(() => {}); };
+  ctx.signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    const decoder = new TextDecoder();
+    for await (const chunk of task.stdout) {
+      ctx.emitLog(decoder.decode(chunk, { stream: true }), 'stdout');
+    }
+    const res = await task.wait();
+    if (res.exitCode !== 0) throw new Error(`flash exited with ${res.exitCode}`);
+    ctx.emitProgress(1, 'completed');
+    return { flashed: fw.name, exitCode: res.exitCode, serialRecovery: res.serialRecovery };
+  } finally {
+    ctx.signal.removeEventListener('abort', onAbort);
+    await task.release();
+  }
+});
+```
+
+- `emitProgress(progress?, message?, data?)` 与 `emitLog(message, stream?)` 推送的事件会进入宿主 `PluginControlBridge` 有界队列供 `PollPluginJob` 长轮询；当调用方执行 `CancelPluginJob`（或插件被禁用/撤权/重载）时，`ctx.signal` 会立即触发 `abort`。
+
 ## 隔离 UI 与工作区标签
 
 隔离页面既可替换 serial 标签内容，也可额外打开 workspace-tab；两者共用 Worker 的解析会话。独立页面可以不绑定串口，例如插件配置器；原始标签、表格和波形可以同时关联一个端口，关闭其中一个不停止其他输入。
@@ -563,8 +689,9 @@ input 为 bytes/lines/none：分别需要 rx:bytes、terminal:read 或无 RX 权
 | `view.sendSerial({data,isHex?,lineEnding?})` | 需要 serial:send 及白名单，不接受 portId，由会话固定端口决定；无端口页拒绝；单次 data ≤65536 个 UTF-16 代码单元 |
 | `view.sendBinary(type, bytes)` | 把 `Uint8Array`/`ArrayBuffer` 原始字节经 8 KiB 分块、一块在途逐块 ACK 发给本页，单条最多 256 MiB、受共享传输资源预算限制；非末块由接收端入缓存后立即确认，末块等完整字节交付异步回调结算；页面导航、关闭或实例退休会取消并拒绝未完成传输 |
 | `view.onBinary(cb)` | 接收页面的完整传输 `{type, bytes: Uint8Array}`；末块的确认等待回调 Promise settle，最多 30 秒 |
+| `view.pickClientArtifact(options?)` | 需要 `ui:view`；`options` 可选 `{title?, filters?}`。在本地视图弹出本机文件选择器并返回 `{artifactId, name, path, sizeBytes, sha256}`（取消返回 `null`）；在远端工作台投影视图上，会触发工作台侧选择本地文件并流式暂存至设备宿主 `ArtifactStore`，最终在设备端 Worker 解析为带设备宿主 `path` 的同一元数据对象，可直接交给本机工具或 `shell.start` |
 
-`plugin.views.*` 只对依附 Worker 的视图触发；纯网页插件与 `worker:false` 视图没有 Worker 侧会话对象。`view.*` 需要 `ui:view`（`view.sendSerial` 另需 `serial:send` 与端口白名单），`tabs.*` 另需 `ui:tabs`。
+`plugin.views.*` 只对依附 Worker 的视图触发；纯网页插件与 `worker:false` 视图没有 Worker 侧会话对象。`view.*` 需要 `ui:view`（`view.sendSerial` 另需 `serial:send` 与端口白名单），`tabs.*` 另需 `ui:tabs`。远端工作台投影视图仅支持隔离模式（`isolated`），不支持 `trusted-web`。
 
 context 包含 tabId、placement、boundPortId、portMode、pluginId、installGeneration、viewId、tabSessionId、viewInstanceId、workerEpoch、streamEpoch。tabId 是工作区身份，不是端口号；streamEpoch 只是初始化值，后续连续性以事件为准。实例退休后 publish/sendSerial/sendBinary 拒绝；切焦点不改端口，切分屏不重建模型。
 
@@ -923,7 +1050,8 @@ self.plugin.on('ui.buttonClick', async ({ buttonId, context }) => {
 | 单文件句柄 | `fs.openFile` 只读、`fs.createFile` 只写另存为；单窗口/写块 ≤1 MiB；每插件最多 4、全局最多 32 个句柄；AbortSignal/close 可取消，commit 不自动重试且发布后不回滚 |
 | 文件保存 | `fs.exportFile` 仅白名单 grant + 相对路径，原子覆盖/建父目录；`fs.saveFile` 每次原生 Save As；二者无内容业务大小限额/隐式期限，取消另存为返回 null，不能以 path 复用授权 |
 | 串口任务 | `serial.sendBytes` / `serial.sendFile` 每窗口最多 64 KiB，固定 `portId` + `expectedConnectionGeneration`；每端口一项发送流程（同一 Worker 不同端口可并行）；闲置约 60 秒回收，无默认执行期限；`done` 可结算 `unknown` |
-| 串口控制 | open/close 需独立 `serial:control` + 端口白名单；close 必须带观察到的 connectionGeneration CAS；参数严格校验、错误 reject、无通用 RPC 隐式截止 |
+| 串口控制与借用 | open/close 与 `serial.loan` 需独立 `serial:control` + 端口白名单；close 必须带观察到的 connectionGeneration CAS；`ports.list`/`ports.status`/`serial.open`/`serial.close` 支持已连接的 `remote::` 端口，而 `serial.loan` 仅限本地非 TTY 端口，`reason` ≤256 字符且随禁用/撤权/重载/卸载自动释放；参数严格校验、错误 reject、无通用 RPC 隐式截止 |
+| 工具暴露与远端投影 | `manifest.tools` 每插件最多 128 项（`name` ≤64 字符、`description` ≤2048 字符），需 `control:expose` 才同步至控制面；远端视图投影仅支持 `isolated` 模式（宿主机内联单资源 ≤16 MiB），`view.pickClientArtifact` 在投影视图代理超时为 10 分钟 |
 | 文件对话框 | 旧 `fs.openDialog` / `fs.openDirectoryDialog` / `fs.saveFile` / `ui.panel.export` 每插件同时最多 8 个；新单文件句柄另受每插件 4、全局 32 个句柄限制；均等待用户完成且不把路径交给插件作为长期授权 |
 | 插件面板 | 单次 append ≤65536 个 UTF-16 代码单元、约 200 条/s；面板总计 524288 个 UTF-16 代码单元，超限丢最旧文本；不是 UTF-8 字节数 |
 | KV | 无键长/值大小/节点数/文件大小上限；值须可无损 JSON 化 |

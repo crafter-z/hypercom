@@ -16,13 +16,13 @@ pub enum CommandError {
 }
 ```
 
-- `Serial`：串口枚举、开关、发送、重连、流控、外部工具、SIM 与 GIT:BASH 模拟终端命令；底层实现位于 `src-tauri/src/serial/`。
+- `Serial`：串口枚举、开关、发送、重连、流控、外部工具、SIM 与 GIT:BASH 模拟终端命令，以及远程控制/租约相关串口错误；底层实现位于 `src-tauri/src/serial/` 与 `src-tauri/src/control/`。
 - `Config`：`set_config`、会话快照、实体 CRUD 和插件配置持久化失败；实体存储位于 `src-tauri/src/commands/storage.rs`，配置模型位于 `src-tauri/src/config/mod.rs`。
 - `Log`：日志目录、writer、迁移、导出和打开路径操作；实现位于 `src-tauri/src/commands/log.rs`。
 - `System`：电源抑制、编辑器关闭审批和弹窗创建/销毁/置顶；实现位于 `src-tauri/src/commands/system_cmds.rs` 与 `src-tauri/src/commands/popout.rs`。
 - `Lock`：命令访问 `AppState` 中同步锁失败。`AppState.log_manager` 是 `Arc<LogManager>`，没有外层 mutex，不返回该变体。
-- `Io`：文件对话框、文件/日志读写、外部工具进程、插件安装资产等 I/O 失败。
-- `Other`：没有明确领域的参数、生命周期、任务 join 或更新网络失败；调用方应优先复用匹配领域变体。
+- `Io`：文件对话框、文件/日志读写、外部工具进程、插件安装资产与远端客户端配置文件读写（`profile_io`）等 I/O 失败。
+- `Other`：没有明确领域的参数、生命周期、任务 join、更新网络失败或控制面鉴权/参数校验失败（如 `commands/control.rs` 的 `map_host_error` 对 `invalid_request` / `invalid_invite` / `pin_mismatch` / `unauthorized` / `revoked` / `forbidden` 的映射）；调用方应优先复用匹配领域变体。
 
 `commands/file.rs` 的 `read_image_data_url` 是软失败接口：空路径、缺失、扩展名不支持、超限或读取失败返回空字符串并记录 warn，前端将空字符串解释为无背景图，不转成命令错误。
 

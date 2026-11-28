@@ -1,6 +1,6 @@
 # 串口管理模块
 
-串口枚举、连接生命周期、参数/流控、读写句柄、虚拟端口（SIM:Loopback）、模拟终端（GIT:BASH，渲染细节见 [`tty.md`](tty.md)）、外部工具（flasher）。后端 `serial/{mod,codec,events,ports_real,ports_sim,ports_tty}.rs` + `tty_sim.rs`，命令层 `commands/{serial,simulation,tty_sim}.rs`；前端 `useSerialPorts` / `useSerialConnection` / [`serialConnectionRuntime`](../../src/utils/serialConnectionRuntime.ts) / [`serialPlugin`](../../src/utils/serialPlugin.ts) / `useSimulation` / `useGitBashSim` / `usePortToolActions`。
+串口枚举、连接生命周期、参数/流控、读写句柄、虚拟端口（SIM:Loopback）、模拟终端（GIT:BASH，渲染细节见 [`tty.md`](tty.md)）、外部工具（flasher）以及串口事件总线/借用租约。后端 `serial/{mod,codec,events,event_hub,lease,managed_loan,ports_real,ports_sim,ports_tty}.rs` + `tty_sim.rs`，命令层 `commands/{serial,control,simulation,tty_sim}.rs`；前端 `useSerialPorts` / `useSerialConnection` / [`serialConnectionRuntime`](../../src/utils/serialConnectionRuntime.ts) / [`serialPlugin`](../../src/utils/serialPlugin.ts) / [`portCapabilities`](../../src/utils/portCapabilities.ts) / `useSimulation` / `useGitBashSim` / `usePortToolActions`。
 
 ## 架构总览
 
@@ -26,7 +26,10 @@ Sidebar/TabBar 连接按钮 ──► useSerialConnection ──► serialConnec
 |------|------|
 | `serial/mod.rs` | `SerialManager`（`ports` / `sim_ports` / `tty_sim_ports` 三张注册表 + `simulate` / `gitbash_sim` 能力开关 + `last_params`）、`PortKind` / `check_virtual_enabled`、全局串口锁纪律；`open_port` / `close_port` / `send_data` / `write_raw` 按 `PortKind` 分派 |
 | `serial/codec.rs` | TX 编码：`parse_hex_string` / `build_tx_bytes`（入参 → 字节的**唯一实现**）/ `normalize_tty_line_ending` / `write_all_with_deadline` + `WRITE_TOTAL_DEADLINE` / `TxOutcome`；纯逻辑，不碰 `serialport` |
-| `serial/events.rs` | 前端事件载荷与派发助手（`serial:data` / `serial:status` / `serial:reconnect_hint`）+ RX 数据落盘；`PortStatus` 枚举收口状态字符串 |
+| `serial/events.rs` | 前端事件载荷与派发助手（`serial:data` / `serial:status` / `serial:reconnect_hint` / `serial:note` / `serial:external-tx` / `serial:tool-loan`）+ RX 数据落盘与 `SerialEventHub` 记录；`PortStatus` 枚举收口状态字符串 |
+| `serial/event_hub.rs` | `SerialEventHub`：纯 Rust 按端口隔离的事件环形缓冲（4096 条 / 2 MiB）与广播通道，供本地 IPC / 远端 TLS / `request` 共享 |
+| `serial/lease.rs` | `PortLeaseRegistry`：显式串口借用租约注册表、心跳续期、TTL 超时回收、连接绑定释放与强制回收 |
+| `serial/managed_loan.rs` | `ManagedPortLoan`：`reserve`（插件工具）/ `reserve_legacy`（旧外部工具）/ `reserve_lease`（显式借用租约）共用的关闭/重开独占屏障 |
 | `serial/ports_real.rs` | 真实串口：`SerialPortHandle` 读写句柄拆分、帧格式映射、热插拔幽灵句柄回收、`open_blocking` / `reconnect_blocking` / `enumerate_system_ports` |
 | `serial/ports_windows.rs` | Windows 默认端口列表：按 `HKLM\HARDWARE\DEVICEMAP\SERIALCOMM` 的值枚举顺序返回 COM 端口，与 SuperCom 的 .NET `SerialPort.GetPortNames()` 路径对齐；`is_com_name` 只放行 `COM<数字>`，`dedupe_names` 按不区分大小写保留首次出现；`serialport::available_ports`（SetupAPI）仅补充 USB 元数据，键/元数据缺失都不影响枚举成员与顺序 |
 | `serial/ports_sim.rs` | 两路模拟串口 SIM:Loopback / SIM:Loopback2：独立回显 + 周期输出（`virtual_port_infos` / `parse_sim_rate_command` / `sim_due_lines`） |
@@ -40,9 +43,10 @@ Sidebar/TabBar 连接按钮 ──► useSerialConnection ──► serialConnec
 
 ### 轮询与合并（`useSerialPorts` + `mergePorts`）
 
-- `useSerialPorts(3000)` 每 3s 轮询 `list_available_ports`；`mapPortInfo()` 恒置 `status:'disconnected'`。
+- `useSerialPorts(3000)` 每 3s 轮询 `list_available_ports`；`mapPortInfo()` 对本地端口恒置 `status:'disconnected'`，对 `port_type === 'remote'` 映射 `remote_status`、`remote_baud_rate`、`remote_generation`、`remote_role`、`remote_allow_loan` 与 `loan`。
+- `commands/serial.rs` 中的 `open_serial_port` / `close_serial_port` / `send_serial_data` / `send_file` / `set_serial_params` / `set_flow_control` 均先由 `hypercom_protocol::PortRef::parse` 路由：`remote::<profileId>::<portId>` 转发至 `RemoteClientManager`（详见 [`collaboration.md`](collaboration.md)），本地端口走 `SerialManager`。
 - Windows 的 `enumerate_system_ports` 委托 `ports_windows::enumerate`，以注册表值顺序作为默认添加顺序，不按 COM 编号排序，也不读取设备添加时间。只接受 `REG_SZ` / `REG_EXPAND_SZ` 且形如 `COM<数字>` 的值；重名（不区分大小写，如 `COM10` / `com10`）保留首次出现，避免把同一端口渲染成两个 dnd-kit 项。键不存在返回空列表；读取错误正常上报；元数据（厂商/产品）失败只记录告警，不改变端口成员与顺序。其他平台沿用 `serialport::available_ports()`。
-- `mergePorts(incoming, existing, portOrder)` 独立合并运行态（status/alias/isHidden/groupId/连接参数/`protocolTemplateId`/`toolRunning`/`mode`/`displayView`/连接代次）。会话默认 `portOrder='added'`，每次刷新按本次枚举排列，暂时缺失的活动端口放在末尾并保留原有宽限期。拖拽或端口号排序切到 `manual`，保留现有顺序并追加新端口；选择「按添加顺序排序」切回 `added` 并立即刷新。响应完成时读取最新排序意图，迟到响应不会覆盖用户刚选的规则。
+- `mergePorts(incoming, existing, portOrder)` 独立合并运行态（status/alias/isHidden/groupId/连接参数/`protocolTemplateId`/`toolRunning`/`pluginToolRunning`/`loan`/`mode`/`displayView`/连接代次）。远端端口以最新枚举上报的 `status`/`baudRate`/`connectionGeneration`/`loan` 为准，保留本地 UI 元数据。会话默认 `portOrder='added'`，每次刷新按本次枚举排列，暂时缺失的活动端口放在末尾并保留原有宽限期；处于 `pluginToolRunning` 或持有 `loan` 的端口在借用期间（如烧录器重启枚举瞬断）也会保留。拖拽或端口号排序切到 `manual`，保留现有顺序并追加新端口；选择「按添加顺序排序」切回 `added` 并立即刷新。响应完成时读取最新排序意图，迟到响应不会覆盖用户刚选的规则。
 
 ### 热插拔语义
 
@@ -129,7 +133,7 @@ openPort(portId, baud)
 - `stream_tool_output` 对 stdout/stderr 保持短行与空行语义，超长无换行输出以最多 16 KiB 原始字节分段发 `tool:output`；跨块 UTF-8/CRLF 尾部留至下一段，非法 UTF-8 仍用 lossy 解码。共用 256 项有界通道，避免单行缓冲无限增长；这是后端读取队列边界，不是 Tauri/WebView 事件队列的总内存保证。
 - 工具 reader、子进程和串口恢复共享同一 owner；工具退出/恢复完成后才发 `tool:exit`，程序性关闭不触发错误的用户回贴。Windows 克隆句柄不继承到工具；Unix/Windows 进程树终止与 reader 收尾必须纳入 owner teardown。
 - `run_port_tool` 在全局串口锁外等待读线程和写租约；真实串口的 Windows 写克隆句柄必须清除 `HANDLE_FLAG_INHERIT`，否则并行启动的兄弟工具可能继承尚未关闭的 COM 句柄，导致 HyperCom 关闭后仍由子进程占有端口。写租约在释放实际 Arc 句柄后才通知关闭完成。正常工具退出立即重开串口。工作目录错误、进程启动失败等「已关串口、工具未启动」路径也按原连接参数尝试重开，并保留原工具错误（如恢复再失败则一并报告）；工具接管期间的预期 disconnected 不触发掉线横幅。正常退出后重开失败仍发 `serial:status error`。
-- 插件流式工具可通过 `shell.start` 的 `serialLoan` 选项临时独占一个宿主串口，同时要求 `serial:control` 和 `shell:execute`。原生预留、关闭屏障和任务收尾不依赖 Worker 存活；只恢复借出前实际连着且未被新意图取代的会话，`task.wait()` 将进程结果与 `serialRecovery` 分开报告。详见[插件接口](../plugin-development.md#将一个串口临时借给工具)。
+- 插件流式工具可通过 `shell.start` 的 `serialLoan` 选项临时独占一个宿主串口，同时要求 `serial:control` 和 `shell:execute`；插件亦可通过 `plugin.serial.loan`（`PortLeaseRegistry`）显式借用/续期/归还本地非 TTY 串口（详见 [`plugins.md`](plugins.md) 与 [`collaboration.md`](collaboration.md)）。原生预留、关闭屏障和任务收尾不依赖 Worker 存活；只恢复借出前实际连着且未被新意图取代的会话，`task.wait()` 将进程结果与 `serialRecovery` 分开报告。详见[插件接口](../plugin-development.md#将一个串口临时借给工具)。
 - 分组整组执行：`usePortToolActions.runToolForGroup` + `GroupToolDialog`——严格配置判定=配置存在+portId 匹配+`command.trim() !== ''`；`utils/groupTool.ts` `partitionGroupPorts` 纯函数；**`Promise.all` 并行**运行已配置端口（跳过运行中端口，单端口失败不中断整组）。
 - 标签页菜单与侧边栏同源（`usePortToolActions`），文案复用 `sidebar.port.contextMenu.*` key。
 

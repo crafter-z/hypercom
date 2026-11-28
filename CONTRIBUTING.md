@@ -40,9 +40,14 @@ npm run build
 
 ```bash
 cargo test --lib --manifest-path src-tauri/Cargo.toml
+npm run test:protocol
+npm run test:cli
+npm run build:cli
 cargo clippy --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
 cargo check --release --lib --manifest-path src-tauri/Cargo.toml
 ```
+
+其中 `npm run test:protocol` / `npm run test:cli` / `npm run build:cli` 分别验证与构建 `src-tauri/hypercom-protocol` 共享协议 crate 和 `src-tauri/hypercomctl` 独立 CLI / MCP 二进制（Windows 工作区建议使用 `npm run test:rust` 以隔离测试临时目录）。
 
 ### 浏览器交互
 

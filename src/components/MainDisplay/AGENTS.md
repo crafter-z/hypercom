@@ -9,8 +9,8 @@
 | `MainDisplay.tsx` | paneTree、拖拽上下文、`ResizeHandle` 和 `TimelineWorkspace` 的宿主 |
 | `Pane.tsx` | 叶子外壳、TabBar、关闭清理、插件视图测量和端口批量操作 |
 | `SerialContentHost.tsx` | 常驻的 TRX/TTY 内容实例 |
-| `TabBar.tsx` | 标签排序、跨 Pane 拖动、分屏按钮和弹出状态 |
-| `TerminalView.tsx` | `TerminalViewportManager` 的薄壳、过滤/搜索/选择/滚动交互 |
+| `TabBar.tsx` | 标签排序、跨 Pane 拖动、分屏按钮、弹出状态、远端/借用标记及回收入口 |
+| `TerminalView.tsx` | `TerminalViewportManager` 的薄壳、过滤/搜索/选择/滚动交互、远端角色状态条与借用归还横幅 |
 | `TerminalFilterBar.tsx` / `TerminalSearchBar.tsx` | 显示控制与一级搜索输入 |
 | `SearchAdvancedOptions.tsx` | 本地/全局共用的高级选项二级浮层、条件计数与重置；不负责匹配扫描 |
 | `GlobalTerminalSearchPanel.tsx` / `globalTerminalSearch.ts` | 当前 WebView 的多来源搜索面板与显式来源注册表 |
