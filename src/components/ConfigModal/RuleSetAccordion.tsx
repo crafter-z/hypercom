@@ -106,7 +106,7 @@ function RuleSetAccordion<TSet extends { id: string; name: string }>({
       )}
       <button type="button" className="btn btn-sm" disabled={saving} onClick={() => add()}><Plus size={14} /> {addLabel}</button>
     </div>
-    {items.length > 0 && (
+    {items.length > 1 && (
       <div className="editor-search-row">
         <div className="editor-search-field">
           <Search size={13} aria-hidden="true" />
