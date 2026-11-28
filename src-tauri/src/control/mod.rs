@@ -4,7 +4,9 @@
 //! TLS 1.3 remote host (`Authority` + `build_tls_acceptor`), and a 1-second TTL
 //! lease reaper over `PortLeaseRegistry` and `SerialEventHub`.
 
+pub mod artifacts;
 mod dispatch;
+pub mod plugin_bridge;
 mod server;
 
 use std::collections::HashMap;
@@ -106,6 +108,8 @@ pub struct ControlHub {
     app_handle: Mutex<Option<tauri::AppHandle>>,
     remote_clients: Mutex<Option<Arc<crate::remote_client::RemoteClientManager>>>,
     remote_leases: Mutex<HashMap<String, RemoteLeaseTrack>>,
+    artifact_store: Arc<artifacts::ArtifactStore>,
+    plugin_bridge: Arc<plugin_bridge::PluginControlBridge>,
     local_running: AtomicBool,
     local_clients: AtomicUsize,
     remote_state: tokio::sync::Mutex<Option<RemoteServerHandle>>,
@@ -124,6 +128,8 @@ impl ControlHub {
     ) -> Self {
         let endpoint_name = resolve_endpoint_name();
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let artifact_store = Arc::new(artifacts::ArtifactStore::new(state_dir.join("artifacts")));
+        let plugin_bridge = Arc::new(plugin_bridge::PluginControlBridge::new());
         Self {
             host_id: Uuid::new_v4().to_string(),
             endpoint_name,
@@ -135,6 +141,8 @@ impl ControlHub {
             app_handle: Mutex::new(None),
             remote_clients: Mutex::new(None),
             remote_leases: Mutex::new(HashMap::new()),
+            artifact_store,
+            plugin_bridge,
             local_running: AtomicBool::new(false),
             local_clients: AtomicUsize::new(0),
             remote_state: tokio::sync::Mutex::new(None),
@@ -162,6 +170,21 @@ impl ControlHub {
         }
     }
 
+    pub(crate) fn app_handle(&self) -> Option<tauri::AppHandle> {
+        self.app_handle
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    pub fn artifact_store(&self) -> &Arc<artifacts::ArtifactStore> {
+        &self.artifact_store
+    }
+
+    pub fn plugin_bridge(&self) -> &Arc<plugin_bridge::PluginControlBridge> {
+        &self.plugin_bridge
+    }
+
     pub fn set_remote_clients(&self, clients: Arc<crate::remote_client::RemoteClientManager>) {
         if let Ok(mut guard) = self.remote_clients.lock() {
             *guard = Some(clients);
@@ -187,12 +210,22 @@ impl ControlHub {
         tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut ticks: u64 = 0;
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
                         let reaped = hub.lease_registry.reap_expired(Some(&hub.event_hub)).await;
                         if reaped > 0 {
                             log::info!("Reaped {reaped} expired port lease(s)");
+                        }
+                        ticks = ticks.wrapping_add(1);
+                        if ticks.is_multiple_of(30) {
+                            let store = Arc::clone(&hub.artifact_store);
+                            if let Ok(removed) = tokio::task::spawn_blocking(move || store.reap_expired()).await {
+                                if removed > 0 {
+                                    log::info!("Reaped {removed} expired staged artifact(s)");
+                                }
+                            }
                         }
                     }
                     _ = shutdown_rx.changed() => {
@@ -215,6 +248,7 @@ impl ControlHub {
         if let Ok(mut leases) = self.remote_leases.lock() {
             leases.clear();
         }
+        self.artifact_store.cleanup_all();
     }
 
     pub(crate) fn emit_note(
@@ -405,6 +439,7 @@ impl ControlHub {
         ports: Vec<String>,
         role: RemoteRole,
         allow_loan: bool,
+        device_plugins: bool,
         ttl_ms: Option<u64>,
     ) -> Result<RemoteInvite, HostError> {
         let authority = {
@@ -424,7 +459,7 @@ impl ControlHub {
                 ports,
                 allow_loan,
                 automation: false,
-                device_plugins: false,
+                device_plugins,
                 device_tools: false,
             },
             ttl_ms,

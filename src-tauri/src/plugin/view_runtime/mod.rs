@@ -104,6 +104,7 @@ pub struct Session {
     /// Plugin-level `clipboard` grant, frozen into this view's Permissions-Policy
     /// and native paste policy at creation. Revoking it retires the view.
     pub clipboard: bool,
+    pub projected: bool,
     #[cfg(windows)]
     interaction_rate: Mutex<InteractionRate>,
     #[cfg(any(windows, test))]
@@ -151,6 +152,7 @@ fn error(message: impl Into<String>) -> CommandError { CommandError::Other(messa
 
 fn authorized(app: &tauri::AppHandle, session: &Session) -> bool {
     if !session.alive.load(Ordering::Acquire) { return false; }
+    if session.projected { return true; }
     let state = app.state::<AppState>();
     let Ok(manager) = state.config_manager.lock() else { return false; };
     manager.get_config().entities.plugin_configs.iter().any(|entry| {
@@ -214,11 +216,18 @@ pub async fn create(source: tauri::Webview, state: &AppState, binding: Binding) 
         Some(plugin::web_data_dir(&plugins_dir, &binding.plugin_id, &binding.install_generation).map_err(error)?)
     } else { None };
     if let Some(port) = binding.bound_port_id.clone() {
-        let manager = state.serial_manager.clone();
-        let ports = tokio::task::spawn_blocking(move || crate::serial::list_ports_blocking(&manager))
-            .await.map_err(|e| error(e.to_string()))?.map_err(|e| error(e.to_string()))?;
-        if !ports.iter().any(|candidate| candidate.id == port) {
-            return Err(error("视图绑定端口不存在"));
+        if hypercom_protocol::PortRef::is_remote_str(&port) {
+            let remote_ports = state.remote_clients.list_available_remote_ports();
+            if !remote_ports.iter().any(|candidate| candidate.id == port) {
+                return Err(error("视图绑定端口不存在"));
+            }
+        } else {
+            let manager = state.serial_manager.clone();
+            let ports = tokio::task::spawn_blocking(move || crate::serial::list_ports_blocking(&manager))
+                .await.map_err(|e| error(e.to_string()))?.map_err(|e| error(e.to_string()))?;
+            if !ports.iter().any(|candidate| candidate.id == port) {
+                return Err(error("视图绑定端口不存在"));
+            }
         }
     }
     // Validate and snapshot only the selected view, once, off the async worker.
@@ -227,7 +236,7 @@ pub async fn create(source: tauri::Webview, state: &AppState, binding: Binding) 
     let resources = tokio::task::spawn_blocking(move || resources::snapshot_lazy(&dir, &resource_view))
         .await.map_err(|e| error(e.to_string()))?.map_err(error)?;
     let session = Arc::new(Session {
-        binding, alive: Arc::new(AtomicBool::new(true)), trusted_web: declaration.is_trusted_web(), clipboard, permission: input_permission(&declaration),
+        binding, alive: Arc::new(AtomicBool::new(true)), trusted_web: declaration.is_trusted_web(), clipboard, projected: false, permission: input_permission(&declaration),
         // Only the native Windows backend receives page callbacks. Keep the pure
         // rate-limit and document checks available to tests on every platform.
         #[cfg(windows)]
@@ -261,6 +270,125 @@ pub async fn create(source: tauri::Webview, state: &AppState, binding: Binding) 
         { let _ = (source, session, declaration, resources, web_data_dir); Err("此平台尚未通过原生隔离策略验收，不开放插件视图".into()) }
     }).await;
     if result.is_err() { retire_registry(Some(&id), None); }
+    result
+}
+
+pub async fn create_projected(
+    source: tauri::Webview,
+    binding: Binding,
+    session_dto: hypercom_protocol::RemoteViewSessionDto,
+) -> Result<(), CommandError> {
+    require_main(&source)?;
+    for identity in [
+        &binding.view_instance_id,
+        &binding.tab_session_id,
+        &binding.tab_id,
+        &binding.install_generation,
+    ] {
+        if uuid::Uuid::parse_str(identity).is_err() {
+            return Err(error("视图会话身份必须为 UUID"));
+        }
+    }
+    plugin::validate_plugin_id(&binding.plugin_id).map_err(error)?;
+    if binding.plugin_id != session_dto.plugin_id || binding.view_id != session_dto.view_id {
+        return Err(error("投影视图身份不匹配"));
+    }
+    plugin::validate_view_resource_path(&session_dto.entry).map_err(error)?;
+    if session_dto.entry.starts_with("__host/") || !session_dto.entry.ends_with(".js") {
+        return Err(error("投影视图 entry 非法"));
+    }
+    for style in &session_dto.styles {
+        plugin::validate_view_resource_path(style).map_err(error)?;
+        if style.starts_with("__host/") || !style.ends_with(".css") {
+            return Err(error("投影视图 style 非法"));
+        }
+    }
+    let mut resources = HashMap::new();
+    let mut extra_assets = Vec::new();
+    for asset in &session_dto.assets {
+        plugin::validate_view_resource_path(&asset.rel_path).map_err(error)?;
+        if asset.rel_path.starts_with("__host/") {
+            return Err(error("投影视图资源不得覆盖宿主命名空间"));
+        }
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&asset.data_base64)
+            .map_err(|_| error(format!("投影视图资源解码失败: {}", asset.rel_path)))?;
+        resources.insert(
+            asset.rel_path.clone(),
+            resources::generated_resource(&asset.rel_path, decoded),
+        );
+        if asset.rel_path != session_dto.entry && !session_dto.styles.contains(&asset.rel_path) {
+            extra_assets.push(asset.rel_path.clone());
+        }
+    }
+    if !resources.contains_key(&session_dto.entry)
+        || session_dto.styles.iter().any(|style| !resources.contains_key(style))
+    {
+        return Err(error("投影视图缺少必需入口或样式资源"));
+    }
+    let declaration = UiView {
+        id: session_dto.view_id.clone(),
+        label: session_dto.label.clone(),
+        entry: session_dto.entry.clone(),
+        mode: plugin::ViewMode::Isolated,
+        styles: session_dto.styles.clone(),
+        assets: extra_assets,
+        modes: vec!["trx".into(), "tty".into()],
+        input: "none".into(),
+        placements: vec!["workspace-tab".into()],
+        port_binding: "optional".into(),
+        restore_on_startup: false,
+        worker: true,
+    };
+    validate_binding(&binding, &declaration)?;
+    if let Some(mode) = binding.port_mode.as_deref() {
+        if binding.bound_port_id.is_none() || !["trx", "tty"].contains(&mode) {
+            return Err(error("视图端口工作模式非法"));
+        }
+    }
+    let session = Arc::new(Session {
+        binding,
+        alive: Arc::new(AtomicBool::new(true)),
+        trusted_web: false,
+        clipboard: true,
+        projected: true,
+        permission: None,
+        #[cfg(windows)]
+        interaction_rate: Mutex::new(InteractionRate::new()),
+        #[cfg(any(windows, test))]
+        control_rate: Mutex::new(TokenBucket::new(128.0)),
+        #[cfg(any(windows, test))]
+        timeline_preview_rate: Mutex::new(TokenBucket::new(TIMELINE_PREVIEW_RATE)),
+        #[cfg(any(windows, test))]
+        timeline_control_rate: Mutex::new(TokenBucket::new(TIMELINE_CONTROL_RATE)),
+        #[cfg(windows)]
+        binary_rate_reported: AtomicBool::new(false),
+        document: Mutex::new(DocumentState::default()),
+    });
+    {
+        let mut registry = registry().lock().map_err(|e| error(e.to_string()))?;
+        if registry.live.len() >= 16
+            || registry.live.values().filter(|s| s.binding.plugin_id == session.binding.plugin_id).count() >= 8
+        {
+            return Err(error("原生视图实例额度已满"));
+        }
+        if registry.live.contains_key(&session.binding.view_instance_id) {
+            return Err(error("原生视图身份已存在"));
+        }
+        registry.live.insert(session.binding.view_instance_id.clone(), session.clone());
+    }
+    let id = session.binding.view_instance_id.clone();
+    let app = source.app_handle().clone();
+    let result = on_ui(&app, move || {
+        #[cfg(windows)]
+        { windows::create(&source.window(), session, declaration, resources, None) }
+        #[cfg(not(windows))]
+        { let _ = (source, session, declaration, resources); Err("此平台尚未通过原生隔离策略验收，不开放插件视图".into()) }
+    })
+    .await;
+    if result.is_err() {
+        retire_registry(Some(&id), None);
+    }
     result
 }
 fn input_permission(view: &UiView) -> Option<&'static str> { match view.input.as_str() { "bytes" => Some("rx:bytes"), "lines" => Some("terminal:read"), _ => None } }
@@ -448,7 +576,7 @@ fn view_retired_by_grants(session: &Session, grants: &[String]) -> bool {
 pub async fn retire_denied(app: &tauri::AppHandle, plugin: &str, grants: &[String]) -> Result<(), CommandError> {
     let ids = {
         let mut registry = registry().lock().map_err(|e| error(e.to_string()))?;
-        let ids: Vec<_> = registry.live.iter().filter(|(_, session)| session.binding.plugin_id == plugin
+        let ids: Vec<_> = registry.live.iter().filter(|(_, session)| !session.projected && session.binding.plugin_id == plugin
             && view_retired_by_grants(session, grants))
             .map(|(id, _)| id.clone()).collect();
         for id in &ids { if let Some(session) = registry.live.remove(id) { session.alive.store(false, Ordering::Release); } }
@@ -810,7 +938,7 @@ mod tests {
     fn documents_reject_replaced_and_unknown_identities() {
         let session = Session {
             binding: Binding { plugin_id: "com.example.view".into(), install_generation: "generation".into(), view_id: "view".into(), tab_id: String::new(), placement: "workspace-tab".into(), bound_port_id: None, tab_session_id: String::new(), view_instance_id: String::new(), port_mode: None, worker_epoch: 1, stream_epoch: 0 },
-            alive: Arc::new(AtomicBool::new(true)), trusted_web: false, clipboard: false, permission: None,
+            alive: Arc::new(AtomicBool::new(true)), trusted_web: false, clipboard: false, projected: false, permission: None,
             #[cfg(windows)]
             interaction_rate: Mutex::new(InteractionRate::new()),
             control_rate: Mutex::new(TokenBucket::new(128.0)), timeline_preview_rate: Mutex::new(TokenBucket::new(TIMELINE_PREVIEW_RATE)), timeline_control_rate: Mutex::new(TokenBucket::new(TIMELINE_CONTROL_RATE)),
@@ -887,7 +1015,7 @@ mod tests {
         fn session(trusted_web: bool, clipboard: bool, permission: Option<&'static str>) -> Session {
             Session {
                 binding: Binding { plugin_id: "com.example.view".into(), install_generation: "generation".into(), view_id: "view".into(), tab_id: String::new(), placement: "workspace-tab".into(), bound_port_id: None, tab_session_id: String::new(), view_instance_id: String::new(), port_mode: None, worker_epoch: 1, stream_epoch: 0 },
-                alive: Arc::new(AtomicBool::new(true)), trusted_web, clipboard, permission,
+                alive: Arc::new(AtomicBool::new(true)), trusted_web, clipboard, projected: false, permission,
                 #[cfg(windows)]
                 interaction_rate: Mutex::new(InteractionRate::new()),
                 control_rate: Mutex::new(TokenBucket::new(128.0)), timeline_preview_rate: Mutex::new(TokenBucket::new(TIMELINE_PREVIEW_RATE)), timeline_control_rate: Mutex::new(TokenBucket::new(TIMELINE_CONTROL_RATE)),

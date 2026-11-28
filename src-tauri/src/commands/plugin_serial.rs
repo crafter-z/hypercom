@@ -88,6 +88,12 @@ pub struct PluginSerialPort {
     pub baud_rate: Option<u32>,
     /// Last successful backend generation, retained after close (initially zero).
     pub connection_generation: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_remote: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_allow_loan: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -312,7 +318,41 @@ fn port_snapshot(
             .get_last_params(port_id)
             .map(|params| params.baud_rate),
         connection_generation: manager.status_generation(port_id).unwrap_or(0),
+        is_remote: None,
+        remote_role: None,
+        remote_allow_loan: None,
     }
+}
+
+fn remote_port_snapshot(port: &serial::PortInfo) -> PluginSerialPort {
+    PluginSerialPort {
+        id: port.id.clone(),
+        name: port.name.clone(),
+        status: if port.remote_status.as_deref() == Some("connected") {
+            "connected"
+        } else {
+            "disconnected"
+        },
+        port_type: "remote",
+        mode: "trx",
+        baud_rate: port.remote_baud_rate,
+        connection_generation: port.remote_generation.unwrap_or(0),
+        is_remote: Some(true),
+        remote_role: port.remote_role.clone(),
+        remote_allow_loan: port.remote_allow_loan,
+    }
+}
+
+fn find_remote_port_snapshot(
+    state: &AppState,
+    port_id: &str,
+) -> Option<PluginSerialPort> {
+    state
+        .remote_clients
+        .list_available_remote_ports()
+        .into_iter()
+        .find(|port| port.id == port_id)
+        .map(|port| remote_port_snapshot(&port))
 }
 
 #[tauri::command]
@@ -329,6 +369,60 @@ pub async fn plugin_serial_open(
     // Entry validation must also happen before registering a port intent. Keep
     // disk I/O on the blocking pool below; this config-only check is inexpensive.
     require_current_entry(&state, &plugin_id, &expected_generation)?;
+    if let Ok(hypercom_protocol::PortRef::Remote {
+        profile_id,
+        port_id: remote_port_id,
+    }) = hypercom_protocol::PortRef::parse(&port_id)
+    {
+        {
+            let _gate = super::plugin::acquire_plugin_io(&state).await?;
+            require_scoped_serial_access(
+                &state,
+                &plugin_id,
+                &expected_generation,
+                Some(&port_id),
+                None,
+            )?;
+        }
+        let existing = find_remote_port_snapshot(&state, &port_id);
+        let was_connected = existing
+            .as_ref()
+            .is_some_and(|port| port.status == "connected");
+        let resolved_args = params.unwrap_or_default().resolve(remote_port_id, None);
+        let app = window.app_handle().clone();
+        state
+            .remote_clients
+            .open_port(profile_id, resolved_args, Some(&app))
+            .await?;
+        {
+            let _gate = super::plugin::acquire_plugin_io(&state).await?;
+            require_scoped_serial_access(
+                &state,
+                &plugin_id,
+                &expected_generation,
+                Some(&port_id),
+                None,
+            )?;
+        }
+        let port = find_remote_port_snapshot(&state, &port_id).unwrap_or_else(|| PluginSerialPort {
+            id: port_id.clone(),
+            name: remote_port_id.to_string(),
+            status: "connected",
+            port_type: "remote",
+            mode: "trx",
+            baud_rate: None,
+            connection_generation: existing.map_or(0, |p| p.connection_generation),
+            is_remote: Some(true),
+            remote_role: None,
+            remote_allow_loan: None,
+        });
+        let connection_generation = port.connection_generation;
+        return Ok(PluginSerialOpenResult {
+            port,
+            result: if was_connected { "already-open" } else { "opened" },
+            connection_generation,
+        });
+    }
     let app = window.app_handle().clone();
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -398,6 +492,64 @@ pub async fn plugin_serial_close(
     // A CAS mismatch is not an idempotent close: even when disconnected, it
     // identifies a stale control request and must not cancel a newer intent.
     require_current_entry(&state, &plugin_id, &expected_generation)?;
+    if let Ok(hypercom_protocol::PortRef::Remote {
+        profile_id,
+        port_id: remote_port_id,
+    }) = hypercom_protocol::PortRef::parse(&port_id)
+    {
+        {
+            let _gate = super::plugin::acquire_plugin_io(&state).await?;
+            require_scoped_serial_access(
+                &state,
+                &plugin_id,
+                &expected_generation,
+                Some(&port_id),
+                None,
+            )?;
+        }
+        let existing = find_remote_port_snapshot(&state, &port_id);
+        let was_connected = existing
+            .as_ref()
+            .is_some_and(|port| port.status == "connected");
+        if let Some(ref current) = existing {
+            if current.connection_generation != expected_connection_generation {
+                return Err(CommandError::Serial(format!(
+                    "Remote port {port_id} generation changed (expected {expected_connection_generation}, current {})",
+                    current.connection_generation
+                )));
+            }
+        }
+        state
+            .remote_clients
+            .close_port(profile_id, remote_port_id, Some(&app))
+            .await?;
+        {
+            let _gate = super::plugin::acquire_plugin_io(&state).await?;
+            require_scoped_serial_access(
+                &state,
+                &plugin_id,
+                &expected_generation,
+                Some(&port_id),
+                None,
+            )?;
+        }
+        let port = find_remote_port_snapshot(&state, &port_id).unwrap_or_else(|| PluginSerialPort {
+            id: port_id.clone(),
+            name: remote_port_id.to_string(),
+            status: "disconnected",
+            port_type: "remote",
+            mode: "trx",
+            baud_rate: existing.as_ref().and_then(|p| p.baud_rate),
+            connection_generation: existing.map_or(expected_connection_generation, |p| p.connection_generation),
+            is_remote: Some(true),
+            remote_role: None,
+            remote_allow_loan: None,
+        });
+        return Ok(PluginSerialCloseResult {
+            port,
+            result: if was_connected { "closed" } else { "already-closed" },
+        });
+    }
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let authority = serial_authority(&state, &plugin_id, &expected_generation, Some(&port_id))?;
@@ -474,10 +626,14 @@ pub async fn plugin_serial_list(
                 ));
             }
         }
-        Ok(ports
+        let mut result: Vec<PluginSerialPort> = ports
             .iter()
             .map(|port| port_snapshot(&manager, &port.id, Some(&port.name)))
-            .collect())
+            .collect();
+        drop(manager);
+        let remote_ports = state.remote_clients.list_available_remote_ports();
+        result.extend(remote_ports.iter().map(remote_port_snapshot));
+        Ok(result)
     })
     .await
     .map_err(|error| CommandError::Other(format!("Plugin list ports task failed: {error}")))?
@@ -495,6 +651,11 @@ pub async fn plugin_serial_status(
     validate_target(&plugin_id, &port_id)?;
     let app = window.app_handle().clone();
     require_current_entry(&state, &plugin_id, &expected_generation)?;
+    if hypercom_protocol::PortRef::is_remote_str(&port_id) {
+        let _gate = super::plugin::acquire_plugin_io(&state).await?;
+        require_scoped_serial_access(&state, &plugin_id, &expected_generation, None, None)?;
+        return Ok(find_remote_port_snapshot(&state, &port_id));
+    }
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
         drop(serial_authority(
@@ -862,6 +1023,9 @@ mod tests {
             mode: "trx",
             baud_rate: Some(115200),
             connection_generation: 7,
+            is_remote: None,
+            remote_role: None,
+            remote_allow_loan: None,
         };
         let open = PluginSerialOpenResult {
             port: port.clone(),

@@ -17,7 +17,7 @@ pub struct Resource {
 
 #[cfg(any(windows, test))]
 pub enum ResourceContents {
-    #[cfg(windows)]
+    #[cfg_attr(not(windows), allow(dead_code))]
     Generated(Vec<u8>),
     Declared(DeclaredResource),
 }
@@ -134,7 +134,7 @@ fn metadata_resource(dir: &Path, relative: &str) -> Result<Resource, String> {
     drop(opened);
     Ok(Resource {
         #[cfg(any(windows, test))]
-        mime: mime(relative),
+        mime: mime_for_path(relative),
         #[cfg(any(windows, test))]
         contents: ResourceContents::Declared(DeclaredResource {
             root: dir.to_path_buf(),
@@ -142,6 +142,61 @@ fn metadata_resource(dir: &Path, relative: &str) -> Result<Resource, String> {
             identity: file_identity(dir, &opened)?,
         }),
     })
+}
+
+pub fn generated_resource(path: &str, bytes: Vec<u8>) -> Resource {
+    #[cfg(any(windows, test))]
+    {
+        Resource {
+            mime: mime_for_path(path),
+            contents: ResourceContents::Generated(bytes),
+        }
+    }
+    #[cfg(not(any(windows, test)))]
+    {
+        let _ = (path, bytes);
+        Resource {}
+    }
+}
+
+pub fn read_view_assets_for_projection(
+    dir: &Path,
+    view: &UiView,
+) -> Result<Vec<hypercom_protocol::RemoteViewAssetDto>, String> {
+    use base64::Engine as _;
+    use std::collections::HashSet;
+    use std::io::Read as _;
+
+    const MAX_PROJECTION_ASSET_BYTES: u64 = 16 * 1024 * 1024;
+    let mut seen = HashSet::new();
+    let mut assets = Vec::new();
+    for path in std::iter::once(&view.entry)
+        .chain(&view.styles)
+        .chain(&view.assets)
+    {
+        if !seen.insert(path.as_str()) {
+            continue;
+        }
+        let opened = open_declared(dir, path)?;
+        if opened.len > MAX_PROJECTION_ASSET_BYTES {
+            return Err(format!("视图投影资源过大: {path}"));
+        }
+        let mut bytes = Vec::with_capacity(opened.len as usize);
+        opened
+            .file
+            .take(MAX_PROJECTION_ASSET_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("读取视图资源失败 {path}: {e}"))?;
+        if bytes.len() as u64 != opened.len {
+            return Err(format!("视图资源大小发生变化: {path}"));
+        }
+        assets.push(hypercom_protocol::RemoteViewAssetDto {
+            rel_path: path.clone(),
+            mime: mime_for_path(path).to_string(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        });
+    }
+    Ok(assets)
 }
 
 /// Validate the declared paths and snapshot only identity/size, not payloads.
@@ -184,8 +239,7 @@ pub fn validate_files(dir: &Path, manifest: &PluginManifest) -> Result<(), Strin
     Ok(())
 }
 
-#[cfg(any(windows, test))]
-fn mime(path: &str) -> &'static str {
+pub fn mime_for_path(path: &str) -> &'static str {
     match path
         .rsplit('.')
         .next()
@@ -253,9 +307,6 @@ mod tests {
         {
             let resource = metadata_resource(root.path(), "ui/data.bin").unwrap();
             assert_eq!(resource.mime, "application/octet-stream");
-            #[cfg(not(windows))]
-            let ResourceContents::Declared(declared) = resource.contents;
-            #[cfg(windows)]
             let declared = match resource.contents {
                 ResourceContents::Declared(declared) => declared,
                 ResourceContents::Generated(_) => {

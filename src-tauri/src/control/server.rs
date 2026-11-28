@@ -389,6 +389,9 @@ async fn serve_remote_stream<S: AsyncRead + AsyncWrite + Unpin>(
                             "portLease": true,
                             "remoteTls": true,
                             "notes": true,
+                            "pluginTools": true,
+                            "artifacts": true,
+                            "remotePluginViews": true,
                         }
                     }));
                     if send_reply(&mut tls, &reply).await.is_err() {
@@ -485,6 +488,9 @@ async fn serve_remote_stream<S: AsyncRead + AsyncWrite + Unpin>(
     hub.lease_registry
         .release_by_owner(Some(&hub.event_hub), &conn_owner)
         .await;
+    let app = hub.app_handle();
+    hub.plugin_bridge
+        .close_remote_views_by_owner(app.as_ref(), &conn_owner);
 }
 
 async fn send_reply<S: AsyncRead + AsyncWrite + Unpin>(
@@ -526,25 +532,15 @@ mod tests {
 
     fn test_hub_with_endpoint(endpoint: String) -> Arc<ControlHub> {
         let dir = std::env::temp_dir().join(format!("hc-srv-test-{}", Uuid::new_v4()));
-        let (shutdown_tx, _) = watch::channel(false);
-        Arc::new(ControlHub {
-            host_id: Uuid::new_v4().to_string(),
-            endpoint_name: endpoint,
-            state_dir: dir,
-            serial_manager: Arc::new(Mutex::new(SerialManager::new())),
-            event_hub: Arc::new(SerialEventHub::new()),
-            lease_registry: Arc::new(PortLeaseRegistry::new()),
-            log_manager: Arc::new(LogManager::new()),
-            app_handle: Mutex::new(None),
-            remote_clients: Mutex::new(None),
-            remote_leases: Mutex::new(std::collections::HashMap::new()),
-            local_running: std::sync::atomic::AtomicBool::new(false),
-            local_clients: AtomicUsize::new(0),
-            remote_state: tokio::sync::Mutex::new(None),
-            authority_io: tokio::sync::Mutex::new(()),
-            authority_cache: Mutex::new(None),
-            shutdown_tx,
-        })
+        let mut hub = ControlHub::new(
+            Arc::new(Mutex::new(SerialManager::new())),
+            Arc::new(SerialEventHub::new()),
+            Arc::new(PortLeaseRegistry::new()),
+            Arc::new(LogManager::new()),
+            dir,
+        );
+        hub.endpoint_name = endpoint;
+        Arc::new(hub)
     }
 
     #[tokio::test]
@@ -552,6 +548,13 @@ mod tests {
         let endpoint = format!("hc-hub-{}", &Uuid::new_v4().simple().to_string()[..16]);
         let hub = test_hub_with_endpoint(endpoint.clone());
         hub.start_local_server();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !hub.local_running.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("local IPC server must report running");
         assert!(hub.local_running.load(Ordering::Acquire));
 
         let mut client = AsyncControlClient::connect_local(&endpoint).await.unwrap();
@@ -604,6 +607,7 @@ mod tests {
                 "bench-client".into(),
                 vec!["COM7".into()],
                 RemoteRole::Write,
+                false,
                 false,
                 Some(60_000),
             )

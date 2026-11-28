@@ -58,6 +58,7 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "storage",
     "ui:view",
     "ui:tabs",
+    "control:expose",
 ];
 
 // ==================== Manifest 结构 ====================
@@ -182,9 +183,38 @@ pub struct UiDecl {
     pub views: Vec<UiView>,
 }
 
+fn default_tool_access() -> String {
+    "observe".into()
+}
+
+fn default_tool_mode() -> String {
+    "sync".into()
+}
+
+fn default_tool_schema() -> serde_json::Value {
+    serde_json::json!({ "type": "object", "properties": {} })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginToolDecl {
+    pub name: String,
+    pub description: String,
+    #[serde(default = "default_tool_access")]
+    pub access: String,
+    #[serde(default = "default_tool_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub port_scoped: bool,
+    #[serde(default)]
+    pub accepts_artifacts: bool,
+    #[serde(default = "default_tool_schema")]
+    pub input_schema: serde_json::Value,
+}
+
 /// 插件 manifest（`manifest.json`）。
 /// 必填：`id`（反向域名）/`name`/`version`/`apiVersion`/`permissions`。
-/// 可选：`description`/`entry`/`http`/`shell`/`serial`/`ui`。
+/// 可选：`description`/`entry`/`http`/`shell`/`serial`/`ui`/`hostKind`/`tools`。
 /// `entry` 缺省为空仅用于「纯本地可信网页」插件（无根 Worker）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -204,6 +234,10 @@ pub struct PluginManifest {
     pub permissions: Vec<String>,
     #[serde(default)]
     pub requires: Vec<String>,
+    #[serde(default)]
+    pub host_kind: Option<String>,
+    #[serde(default)]
+    pub tools: Vec<PluginToolDecl>,
     #[serde(default)]
     pub http: Option<HttpScope>,
     #[serde(default)]
@@ -449,6 +483,41 @@ impl PluginManifest {
             if view.placements.iter().any(|p| p == "workspace-tab")
                 && !self.requires.iter().any(|r| r == "plugin-workspace-tabs@1") {
                 return Err("独立标签须声明 plugin-workspace-tabs@1".into());
+            }
+        }
+        if let Some(host_kind) = &self.host_kind {
+            if !matches!(host_kind.as_str(), "workbench" | "host" | "both") {
+                return Err(format!("manifest hostKind 非法: {host_kind}"));
+            }
+        }
+        if self.tools.len() > 128 {
+            return Err("每插件最多声明 128 个工具".into());
+        }
+        let mut tool_names = HashSet::new();
+        for tool in &self.tools {
+            if tool.name.is_empty()
+                || tool.name.len() > 64
+                || !tool
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+            {
+                return Err(format!("插件工具名非法: {}", tool.name));
+            }
+            if !tool_names.insert(&tool.name) {
+                return Err(format!("插件工具名重复: {}", tool.name));
+            }
+            if tool.description.trim().is_empty() || tool.description.len() > 2048 {
+                return Err(format!("插件工具 {} 的 description 非法", tool.name));
+            }
+            if !matches!(tool.access.as_str(), "observe" | "write" | "control") {
+                return Err(format!("插件工具 {} 的 access 非法: {}", tool.name, tool.access));
+            }
+            if !matches!(tool.mode.as_str(), "sync" | "job") {
+                return Err(format!("插件工具 {} 的 mode 非法: {}", tool.name, tool.mode));
+            }
+            if !tool.input_schema.is_object() {
+                return Err(format!("插件工具 {} 的 inputSchema 必须为 JSON 对象", tool.name));
             }
         }
         Ok(())
@@ -1639,6 +1708,85 @@ mod tests {
         assert!(m.serial.is_none());
         assert!(m.http.is_none());
         assert!(m.shell.is_none());
+        assert!(m.host_kind.is_none());
+        assert!(m.tools.is_empty());
+    }
+
+    #[test]
+    fn manifest_validates_host_kind_control_expose_and_tools() {
+        assert!(KNOWN_PERMISSIONS.contains(&"control:expose"));
+
+        for kind in ["workbench", "host", "both"] {
+            let json = serde_json::json!({
+                "id": "com.example.tools",
+                "name": "Tools",
+                "version": "1.0.0",
+                "apiVersion": "1.0",
+                "entry": "main.js",
+                "permissions": ["control:expose"],
+                "hostKind": kind,
+                "tools": [{
+                    "name": "flash_mcu.v1-rc",
+                    "description": "Flash firmware image",
+                    "access": "control",
+                    "mode": "job",
+                    "portScoped": true,
+                    "acceptsArtifacts": true,
+                    "inputSchema": { "type": "object", "properties": { "portId": { "type": "string" } } }
+                }, {
+                    "name": "ping",
+                    "description": "Ping device"
+                }]
+            })
+            .to_string();
+            let m = parse_manifest(&json).unwrap();
+            assert_eq!(m.host_kind.as_deref(), Some(kind));
+            assert_eq!(m.tools.len(), 2);
+            assert_eq!(m.tools[1].access, "observe");
+            assert_eq!(m.tools[1].mode, "sync");
+            assert!(!m.tools[1].port_scoped);
+            assert!(!m.tools[1].accepts_artifacts);
+            assert!(m.tools[1].input_schema.is_object());
+        }
+
+        // Invalid hostKind
+        assert!(parse_manifest(
+            &serde_json::json!({
+                "id": "com.example.tools", "name": "Tools", "version": "1.0.0",
+                "apiVersion": "1.0", "entry": "main.js", "permissions": [],
+                "hostKind": "desktop"
+            }).to_string()
+        ).is_err());
+
+        // Invalid tool name / duplicate name / bad access / bad mode / non-object schema
+        for bad_tools in [
+            serde_json::json!([{ "name": "bad name!", "description": "desc" }]),
+            serde_json::json!([{ "name": "dup", "description": "a" }, { "name": "dup", "description": "b" }]),
+            serde_json::json!([{ "name": "ok", "description": "   " }]),
+            serde_json::json!([{ "name": "ok", "description": "ok", "access": "admin" }]),
+            serde_json::json!([{ "name": "ok", "description": "ok", "mode": "stream" }]),
+            serde_json::json!([{ "name": "ok", "description": "ok", "inputSchema": ["not", "object"] }]),
+        ] {
+            assert!(parse_manifest(
+                &serde_json::json!({
+                    "id": "com.example.tools", "name": "Tools", "version": "1.0.0",
+                    "apiVersion": "1.0", "entry": "main.js", "permissions": [],
+                    "tools": bad_tools
+                }).to_string()
+            ).is_err());
+        }
+
+        // More than 128 tools rejected
+        let too_many: Vec<_> = (0..129)
+            .map(|i| serde_json::json!({ "name": format!("tool_{i}"), "description": "d" }))
+            .collect();
+        assert!(parse_manifest(
+            &serde_json::json!({
+                "id": "com.example.tools", "name": "Tools", "version": "1.0.0",
+                "apiVersion": "1.0", "entry": "main.js", "permissions": [],
+                "tools": too_many
+            }).to_string()
+        ).is_err());
     }
 
 }

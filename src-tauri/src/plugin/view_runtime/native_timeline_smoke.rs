@@ -76,7 +76,7 @@ fn workerless_timeline_native_webview2_smoke() {
         CreateWindowExW(WINDOW_EX_STYLE::default(), w!("STATIC"), PCWSTR::null(), WS_OVERLAPPEDWINDOW, 0, 0, 800, 600, None, None, None, None).unwrap()
     });
     let binding = Binding { plugin_id: "com.example.native-timeline".into(), install_generation: uuid::Uuid::new_v4().to_string(), view_id: "page".into(), tab_id: uuid::Uuid::new_v4().to_string(), placement: "workspace-tab".into(), bound_port_id: None, tab_session_id: uuid::Uuid::new_v4().to_string(), view_instance_id: uuid::Uuid::new_v4().to_string(), port_mode: None, worker_epoch: 0, stream_epoch: 0 };
-    let session = Arc::new(Session { binding, alive: Arc::new(AtomicBool::new(true)), trusted_web: true, clipboard: false, permission: None,
+    let session = Arc::new(Session { binding, alive: Arc::new(AtomicBool::new(true)), trusted_web: true, clipboard: false, projected: false, permission: None,
         interaction_rate: Mutex::new(InteractionRate::new()), control_rate: Mutex::new(TokenBucket::new(128.0)),
         timeline_preview_rate: Mutex::new(TokenBucket::new(20.0)), timeline_control_rate: Mutex::new(TokenBucket::new(64.0)),
         binary_rate_reported: AtomicBool::new(false), document: Mutex::new(DocumentState::default()) });

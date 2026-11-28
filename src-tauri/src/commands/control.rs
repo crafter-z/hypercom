@@ -1,10 +1,13 @@
 //! Tauri commands for HyperCom collaboration control plane, remote TLS host,
 //! and remote client profiles.
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, State, WebviewWindow};
 
 use hypercom_protocol::{
-    HostError, LoanInfoDto, PortRef, RemoteClientDto, RemoteInvite, RemoteRole, RemoteStatusDto,
+    ArtifactInfoDto, ControlCommand, HostError, LoanInfoDto, PluginJobStatusDto,
+    PluginToolDescriptorDto, PluginToolInvokeResultDto, PortRef, RemoteClientDto, RemoteInvite,
+    RemotePluginViewEntryDto, RemoteRole, RemoteStatusDto, RemoteViewEventPageDto,
+    RemoteViewSessionDto,
 };
 
 use super::CommandError;
@@ -79,6 +82,7 @@ pub async fn remote_host_create_invite(
     ports: Vec<String>,
     role: String,
     allow_loan: bool,
+    device_plugins: Option<bool>,
     ttl_secs: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<RemoteInvite, CommandError> {
@@ -86,7 +90,14 @@ pub async fn remote_host_create_invite(
     let ttl_ms = ttl_secs.map(|s| s.saturating_mul(1000));
     state
         .control_hub
-        .create_invite(label, ports, parsed_role, allow_loan, ttl_ms)
+        .create_invite(
+            label,
+            ports,
+            parsed_role,
+            allow_loan,
+            device_plugins.unwrap_or(false),
+            ttl_ms,
+        )
         .await
         .map_err(map_host_error)
 }
@@ -173,4 +184,266 @@ pub async fn remote_client_remove_profile(
         .remote_clients
         .remove_profile(&profile_id, Some(&app))
         .await
+}
+
+#[tauri::command]
+pub fn control_sync_plugin_tools(
+    tools: Vec<PluginToolDescriptorDto>,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    super::plugin::require_main_window(&window)?;
+    state.control_hub.plugin_bridge().sync_plugin_tools(tools);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn control_plugin_reply(
+    request_id: String,
+    ok: bool,
+    result: Option<serde_json::Value>,
+    error: Option<String>,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    super::plugin::require_main_window(&window)?;
+    let _ = state
+        .control_hub
+        .plugin_bridge()
+        .complete_invoke(&request_id, ok, result, error);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub fn control_plugin_job_event(
+    job_id: String,
+    kind: String,
+    message: Option<String>,
+    stream: Option<String>,
+    progress: Option<f64>,
+    data: Option<serde_json::Value>,
+    result: Option<serde_json::Value>,
+    error: Option<String>,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    super::plugin::require_main_window(&window)?;
+    state
+        .control_hub
+        .plugin_bridge()
+        .push_job_event(&job_id, &kind, message, stream, progress, data, result, error)
+        .map_err(map_host_error)
+}
+
+#[tauri::command]
+pub fn control_remote_view_event(
+    remote_instance_id: String,
+    kind: String,
+    payload: Option<serde_json::Value>,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    super::plugin::require_main_window(&window)?;
+    state
+        .control_hub
+        .plugin_bridge()
+        .push_remote_view_event(
+            &remote_instance_id,
+            &kind,
+            payload.unwrap_or(serde_json::Value::Null),
+        )
+        .map_err(map_host_error)
+}
+
+#[tauri::command]
+pub async fn remote_list_plugin_views(
+    profile_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<RemotePluginViewEntryDto>, CommandError> {
+    state
+        .remote_clients
+        .list_remote_plugin_views(&profile_id)
+        .await
+}
+
+#[tauri::command]
+pub async fn remote_open_plugin_view(
+    profile_id: String,
+    plugin_id: String,
+    view_id: String,
+    bound_port_id: Option<String>,
+    params: Option<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<RemoteViewSessionDto, CommandError> {
+    state
+        .remote_clients
+        .open_remote_plugin_view(&profile_id, plugin_id, view_id, bound_port_id, params)
+        .await
+}
+
+#[tauri::command]
+pub async fn remote_send_plugin_view_input(
+    profile_id: String,
+    remote_instance_id: String,
+    kind: String,
+    payload: Option<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CommandError> {
+    state
+        .remote_clients
+        .send_remote_plugin_view_input(
+            &profile_id,
+            remote_instance_id,
+            kind,
+            payload.unwrap_or(serde_json::Value::Null),
+        )
+        .await
+}
+
+#[tauri::command]
+pub async fn remote_poll_plugin_view_events(
+    profile_id: String,
+    remote_instance_id: String,
+    after_seq: Option<u64>,
+    wait_ms: Option<u64>,
+    state: State<'_, AppState>,
+) -> Result<RemoteViewEventPageDto, CommandError> {
+    state
+        .remote_clients
+        .poll_remote_plugin_view_events(
+            &profile_id,
+            remote_instance_id,
+            after_seq,
+            wait_ms.unwrap_or(0),
+        )
+        .await
+}
+
+#[tauri::command]
+pub async fn remote_close_plugin_view(
+    profile_id: String,
+    remote_instance_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    state
+        .remote_clients
+        .close_remote_plugin_view(&profile_id, remote_instance_id)
+        .await
+}
+
+#[tauri::command]
+pub async fn remote_pick_and_upload_artifact(
+    profile_id: String,
+    title: Option<String>,
+    filters: Option<Vec<super::file::PluginFileFilter>>,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<Option<ArtifactInfoDto>, CommandError> {
+    super::plugin::require_main_window(&window)?;
+    let options = super::file::TextFileDialogOptions {
+        title,
+        default_file_name: None,
+        filters,
+    };
+    let win = window.clone();
+    let picked = tokio::task::spawn_blocking(move || {
+        super::file::pick_text_file_path(&win, &options, false)
+    })
+    .await
+    .map_err(|err| CommandError::Other(format!("Artifact file picker failed: {err}")))?;
+    let Some(path) = picked else {
+        return Ok(None);
+    };
+    let info = state
+        .remote_clients
+        .upload_artifact_file(&profile_id, &path)
+        .await?;
+    Ok(Some(info))
+}
+
+#[tauri::command]
+pub async fn create_projected_plugin_view(
+    source: tauri::Webview,
+    binding: crate::plugin::view_runtime::Binding,
+    session: RemoteViewSessionDto,
+) -> Result<(), CommandError> {
+    crate::plugin::view_runtime::create_projected(source, binding, session).await
+}
+
+#[tauri::command]
+pub async fn remote_invoke_plugin_tool(
+    profile_id: String,
+    plugin_id: String,
+    tool: String,
+    args: Option<serde_json::Value>,
+    artifacts: Option<Vec<String>>,
+    timeout_ms: Option<u64>,
+    state: State<'_, AppState>,
+) -> Result<PluginToolInvokeResultDto, CommandError> {
+    let val = state
+        .remote_clients
+        .forward_command(
+            &profile_id,
+            ControlCommand::InvokePluginTool {
+                target: None,
+                plugin_id,
+                tool,
+                args: args.unwrap_or(serde_json::Value::Null),
+                artifacts,
+                timeout_ms,
+            },
+        )
+        .await
+        .map_err(map_host_error)?;
+    serde_json::from_value(val)
+        .map_err(|err| CommandError::Other(format!("Unexpected plugin tool invoke reply: {err}")))
+}
+
+#[tauri::command]
+pub async fn remote_poll_plugin_job(
+    profile_id: String,
+    job_id: String,
+    after_seq: Option<u64>,
+    wait_ms: Option<u64>,
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<PluginJobStatusDto, CommandError> {
+    let val = state
+        .remote_clients
+        .forward_command(
+            &profile_id,
+            ControlCommand::PollPluginJob {
+                target: None,
+                job_id,
+                after_seq,
+                wait_ms: wait_ms.unwrap_or(0),
+                limit,
+            },
+        )
+        .await
+        .map_err(map_host_error)?;
+    serde_json::from_value(val)
+        .map_err(|err| CommandError::Other(format!("Unexpected plugin job status reply: {err}")))
+}
+
+#[tauri::command]
+pub async fn remote_cancel_plugin_job(
+    profile_id: String,
+    job_id: String,
+    state: State<'_, AppState>,
+) -> Result<PluginJobStatusDto, CommandError> {
+    let val = state
+        .remote_clients
+        .forward_command(
+            &profile_id,
+            ControlCommand::CancelPluginJob {
+                target: None,
+                job_id,
+            },
+        )
+        .await
+        .map_err(map_host_error)?;
+    serde_json::from_value(val)
+        .map_err(|err| CommandError::Other(format!("Unexpected plugin job cancel reply: {err}")))
 }

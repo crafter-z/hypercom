@@ -3,19 +3,22 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
 
 use hypercom_protocol::{
-    decode_sha256_pin, validate_remote_endpoint, AsyncControlClient, ControlCommand, HostError,
-    LoanInfoDto, PortRef, PortSnapshotDto, ProfileStore, RemoteInvite, RemoteProfile,
-    SerialParamsDto, SerialRecoveryDto, StreamEventDto, MAX_POLL_MS,
+    decode_sha256_pin, validate_remote_endpoint, ArtifactInfoDto, AsyncControlClient,
+    ControlCommand, HostError, LoanInfoDto, PluginToolDescriptorDto, PortRef, PortSnapshotDto,
+    ProfileStore, RemoteInvite, RemotePluginViewEntryDto, RemoteProfile, RemoteViewEventPageDto,
+    RemoteViewSessionDto, SerialParamsDto, SerialRecoveryDto, StreamEventDto,
+    MAX_ARTIFACT_CHUNK_BYTES, MAX_POLL_MS,
 };
 
 use crate::commands::{CommandError, OpenPortArgs, SendDataArgs, SetSerialParamsArgs};
@@ -41,6 +44,7 @@ pub struct InvitePreviewDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     pub allow_loan: bool,
+    pub device_plugins: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -55,6 +59,7 @@ pub struct RemoteProfileSummaryDto {
     pub role: String,
     pub ports: Vec<String>,
     pub allow_loan: bool,
+    pub device_plugins: bool,
     pub status: String, // "disconnected" | "connecting" | "connected" | "error"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -66,6 +71,7 @@ struct RemoteHostView {
     label: String,
     role: String,
     allow_loan: bool,
+    device_plugins: bool,
     status: String,
     error: Option<String>,
     ports: Vec<PortSnapshotDto>,
@@ -112,6 +118,7 @@ impl RemoteClientManager {
             ports: invite.ports.clone(),
             role: invite.role.map(|r| r.to_string()),
             allow_loan: invite.allow_loan,
+            device_plugins: invite.device_plugins,
         })
     }
 
@@ -236,6 +243,7 @@ impl RemoteClientManager {
                     label: label.clone(),
                     role: profile.permissions.role.to_string(),
                     allow_loan: profile.permissions.allow_loan,
+                    device_plugins: profile.permissions.device_plugins,
                     status: "connecting".to_string(),
                     error: None,
                     ports: Vec::new(),
@@ -278,6 +286,7 @@ impl RemoteClientManager {
                     label: label.clone(),
                     role: profile.permissions.role.to_string(),
                     allow_loan: profile.permissions.allow_loan,
+                    device_plugins: profile.permissions.device_plugins,
                     status: "connected".to_string(),
                     error: None,
                     ports: initial_ports.clone(),
@@ -731,6 +740,252 @@ impl RemoteClientManager {
         Ok(())
     }
 
+    pub async fn list_connected_remote_plugin_tools(&self) -> Vec<PluginToolDescriptorDto> {
+        let targets: Vec<(String, String)> = {
+            let Ok(views) = self.views.lock() else {
+                return Vec::new();
+            };
+            let mut list: Vec<(String, String)> = views
+                .iter()
+                .filter(|(_, view)| view.status == "connected" && view.device_plugins)
+                .map(|(id, view)| (id.clone(), view.label.clone()))
+                .collect();
+            list.sort_by(|a, b| a.0.cmp(&b.0));
+            list
+        };
+        let mut out = Vec::new();
+        for (profile_id, label) in targets {
+            match self
+                .call_typed::<Vec<PluginToolDescriptorDto>>(
+                    &profile_id,
+                    ControlCommand::ListPluginTools,
+                )
+                .await
+            {
+                Ok(tools) => {
+                    for mut tool in tools {
+                        tool.host = format!("remote::{profile_id}");
+                        tool.host_label = Some(label.clone());
+                        out.push(tool);
+                    }
+                }
+                Err(err) => {
+                    log::debug!(
+                        "Failed to list remote plugin tools from '{}': {}",
+                        profile_id,
+                        err
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    pub async fn list_remote_plugin_views(
+        &self,
+        profile_id: &str,
+    ) -> Result<Vec<RemotePluginViewEntryDto>, CommandError> {
+        self.call_typed(profile_id, ControlCommand::ListRemotePluginViews)
+            .await
+    }
+
+    pub async fn open_remote_plugin_view(
+        &self,
+        profile_id: &str,
+        plugin_id: String,
+        view_id: String,
+        bound_port_id: Option<String>,
+        params: Option<serde_json::Value>,
+    ) -> Result<RemoteViewSessionDto, CommandError> {
+        let normalized_port = match bound_port_id {
+            Some(raw) => match PortRef::parse(&raw).map_err(map_host_error)? {
+                PortRef::Remote {
+                    profile_id: ref_profile,
+                    port_id: remote_port_id,
+                } => {
+                    if ref_profile != profile_id {
+                        return Err(CommandError::Other(format!(
+                            "Bound port '{raw}' does not belong to remote host '{profile_id}'"
+                        )));
+                    }
+                    Some(remote_port_id.to_string())
+                }
+                PortRef::Local(local) => Some(local.to_string()),
+            },
+            None => None,
+        };
+        self.call_typed(
+            profile_id,
+            ControlCommand::OpenRemotePluginView {
+                plugin_id,
+                view_id,
+                bound_port_id: normalized_port,
+                params,
+            },
+        )
+        .await
+    }
+
+    pub async fn send_remote_plugin_view_input(
+        &self,
+        profile_id: &str,
+        remote_instance_id: String,
+        kind: String,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, CommandError> {
+        self.call_value(
+            profile_id,
+            ControlCommand::SendRemotePluginViewInput {
+                remote_instance_id,
+                kind,
+                payload,
+            },
+        )
+        .await
+    }
+
+    pub async fn poll_remote_plugin_view_events(
+        &self,
+        profile_id: &str,
+        remote_instance_id: String,
+        after_seq: Option<u64>,
+        wait_ms: u64,
+    ) -> Result<RemoteViewEventPageDto, CommandError> {
+        self.call_typed(
+            profile_id,
+            ControlCommand::PollRemotePluginViewEvents {
+                remote_instance_id,
+                after_seq,
+                wait_ms,
+            },
+        )
+        .await
+    }
+
+    pub async fn close_remote_plugin_view(
+        &self,
+        profile_id: &str,
+        remote_instance_id: String,
+    ) -> Result<(), CommandError> {
+        let _ = self
+            .call_value(
+                profile_id,
+                ControlCommand::CloseRemotePluginView { remote_instance_id },
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn upload_artifact_file(
+        &self,
+        profile_id: &str,
+        file_path: &Path,
+    ) -> Result<ArtifactInfoDto, CommandError> {
+        let mut file = tokio::fs::File::open(file_path)
+            .await
+            .map_err(|err| CommandError::Io(format!("Failed to open artifact file: {err}")))?;
+        let meta = file
+            .metadata()
+            .await
+            .map_err(|err| CommandError::Io(format!("Failed to stat artifact file: {err}")))?;
+        if !meta.is_file() {
+            return Err(CommandError::Other(
+                "Selected artifact path is not a regular file".into(),
+            ));
+        }
+        let total_bytes = meta.len();
+        let name = file_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("artifact.bin")
+            .to_string();
+
+        let begin_val = self
+            .call_value(
+                profile_id,
+                ControlCommand::ArtifactBegin {
+                    target: None,
+                    name,
+                    total_bytes: Some(total_bytes),
+                    ttl_ms: None,
+                },
+            )
+            .await?;
+        let upload_id = begin_val
+            .get("uploadId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CommandError::Other("Remote host returned invalid uploadId".into()))?
+            .to_string();
+
+        let mut buf = vec![0u8; MAX_ARTIFACT_CHUNK_BYTES];
+        let mut offset: u64 = 0;
+        let mut hasher = Sha256::new();
+
+        loop {
+            let n = match tokio::io::AsyncReadExt::read(&mut file, &mut buf).await {
+                Ok(n) => n,
+                Err(err) => {
+                    let _ = self
+                        .call_value(
+                            profile_id,
+                            ControlCommand::ArtifactAbort {
+                                target: None,
+                                upload_id,
+                            },
+                        )
+                        .await;
+                    return Err(CommandError::Io(format!(
+                        "Failed to read artifact file: {err}"
+                    )));
+                }
+            };
+            if n == 0 {
+                break;
+            }
+            let chunk = &buf[..n];
+            hasher.update(chunk);
+            if let Err(err) = self
+                .call_value(
+                    profile_id,
+                    ControlCommand::ArtifactChunk {
+                        target: None,
+                        upload_id: upload_id.clone(),
+                        offset,
+                        data_base64: STANDARD.encode(chunk),
+                    },
+                )
+                .await
+            {
+                let _ = self
+                    .call_value(
+                        profile_id,
+                        ControlCommand::ArtifactAbort {
+                            target: None,
+                            upload_id,
+                        },
+                    )
+                    .await;
+                return Err(err);
+            }
+            offset = offset.saturating_add(n as u64);
+        }
+
+        let sha256: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        self.call_typed(
+            profile_id,
+            ControlCommand::ArtifactCommit {
+                target: None,
+                upload_id,
+                expected_sha256: Some(sha256),
+            },
+        )
+        .await
+    }
+
     async fn call_value(
         &self,
         profile_id: &str,
@@ -1149,6 +1404,7 @@ fn build_summary(
         role: profile.permissions.role.to_string(),
         ports: profile.permissions.ports.clone(),
         allow_loan: profile.permissions.allow_loan,
+        device_plugins: profile.permissions.device_plugins,
         status,
         error,
         port_count,

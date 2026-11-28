@@ -136,6 +136,9 @@ pub struct PluginManifestView {
     pub permissions: Vec<String>,
     pub requires: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_kind: Option<String>,
+    pub tools: Vec<plugin::PluginToolDecl>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub http: Option<plugin::HttpScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<plugin::ShellScope>,
@@ -156,6 +159,8 @@ impl From<&PluginManifest> for PluginManifestView {
             entry: m.entry.clone(),
             permissions: m.permissions.clone(),
             requires: m.requires.clone(),
+            host_kind: m.host_kind.clone(),
+            tools: m.tools.clone(),
             http: m.http.clone(),
             shell: m.shell.clone(),
             serial: m.serial.clone(),
@@ -368,6 +373,10 @@ pub async fn reload_plugin(
         .await;
     retire_plugin_file_io(&state, &id);
     revoke_plugin_directory_grants(&id);
+    state
+        .control_hub
+        .plugin_bridge()
+        .retire_plugin(Some(window.app_handle()), &id);
     plugin::view_runtime::retire_plugin(window.app_handle(), &id).await?;
     log::info!("Plugin reloaded from installed code: {id}");
     Ok(result)
@@ -590,6 +599,10 @@ async fn install_prepared_transaction_observed(
             .lease_registry
             .release_by_owner_prefix(Some(&state.event_hub), &format!("plugin:{id}:"))
             .await;
+        state
+            .control_hub
+            .plugin_bridge()
+            .retire_plugin(Some(app), &id);
         retire_plugin_file_io(state, &id);
         plugin::view_runtime::retire_plugin(app, &id).await
     }, || retire_plugin_serial_tasks(state, Some(&id)))
@@ -1212,6 +1225,10 @@ pub async fn uninstall_plugin(
             .lease_registry
             .release_by_owner_prefix(Some(&state.event_hub), &format!("plugin:{id}:"))
             .await;
+        state
+            .control_hub
+            .plugin_bridge()
+            .retire_plugin(Some(window.app_handle()), &id);
         // The plugin is already gone from config. A stuck native teardown may
         // still freeze the UI thread, so the view runtime bounds it internally:
         // report the failure, keep the command responsive, and retry later.
@@ -1431,6 +1448,10 @@ pub async fn set_plugin_enabled(
             .lease_registry
             .release_by_owner_prefix(Some(&state.event_hub), &format!("plugin:{id}:"))
             .await;
+        state
+            .control_hub
+            .plugin_bridge()
+            .retire_plugin(Some(window.app_handle()), &id);
         if let Err(e) = plugin::view_runtime::retire_plugin(window.app_handle(), &id).await {
             log::warn!("Failed to retire disabled plugin views for {id}: {e}");
         }
@@ -1481,6 +1502,10 @@ pub async fn set_plugin_trusted_web(
             .lease_registry
             .release_by_owner_prefix(Some(&state.event_hub), &format!("plugin:{id}:"))
             .await;
+        state
+            .control_hub
+            .plugin_bridge()
+            .retire_plugin(Some(window.app_handle()), &id);
         plugin::view_runtime::retire_plugin(window.app_handle(), &id).await
             .map_err(|e| CommandError::Other(format!("网页信任已撤销，但关闭视图失败: {e}")))
     } else {
@@ -1607,6 +1632,12 @@ pub async fn set_plugin_permissions(
             .lease_registry
             .release_by_owner_prefix(Some(&state.event_hub), &format!("plugin:{id}:"))
             .await;
+    }
+    if !permissions.iter().any(|p| p == "control:expose") {
+        state
+            .control_hub
+            .plugin_bridge()
+            .retire_plugin(Some(window.app_handle()), &id);
     }
     let view_result = plugin::view_runtime::retire_denied(window.app_handle(), &id, &permissions).await;
     let snapshot = result.finish(view_result)?;

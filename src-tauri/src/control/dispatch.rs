@@ -5,13 +5,15 @@ use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
+use tauri::Manager;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use hypercom_protocol::{
     Access, ControlCommand, EventPageDto, ExpectMatcher, ExpectSpec, HostError, LoanInfoDto,
-    PortRef, PortSnapshotDto, RemoteRole, RequestOutcomeDto, SerialParamsDto, SerialRecoveryDto,
-    StreamEventDto, MAX_EXPECT_MS, MAX_POLL_MS, MAX_WRITE_BYTES, PROTOCOL_VERSION,
+    PluginToolDescriptorDto, PortRef, PortSnapshotDto, ProfileStore, RemotePluginViewEntryDto,
+    RemoteRole, RequestOutcomeDto, SerialParamsDto, SerialRecoveryDto, StreamEventDto,
+    MAX_EXPECT_MS, MAX_POLL_MS, MAX_WRITE_BYTES, PROTOCOL_VERSION,
 };
 
 use crate::commands::OpenPortArgs;
@@ -19,6 +21,7 @@ use crate::serial::{
     self, AcquireLeaseRequest, HubEvent, HubEventKind, LoanMetadata, SerialManager,
 };
 
+use super::plugin_bridge::ResolvedArtifactDto;
 use super::{Actor, ControlHub, RemoteLeaseTrack};
 
 const MAX_NOTE_BYTES: usize = 4096;
@@ -66,14 +69,22 @@ impl ControlHub {
                 ports,
                 role,
                 allow_loan,
+                device_plugins,
                 ttl_secs,
             } => {
                 require_local(&actor)?;
                 let parsed_role = role.parse::<RemoteRole>()?;
                 let ttl_ms = ttl_secs.map(|s| s.saturating_mul(1000));
                 to_json(
-                    self.create_invite(label, ports, parsed_role, allow_loan, ttl_ms)
-                        .await?,
+                    self.create_invite(
+                        label,
+                        ports,
+                        parsed_role,
+                        allow_loan,
+                        device_plugins,
+                        ttl_ms,
+                    )
+                    .await?,
                 )
             }
             ControlCommand::RemoteListClients => {
@@ -121,6 +132,9 @@ impl ControlHub {
                     "portLease": true,
                     "remoteTls": true,
                     "notes": true,
+                    "pluginTools": true,
+                    "artifacts": true,
+                    "remotePluginViews": true,
                 }
             })),
             ControlCommand::HostInfo => {
@@ -506,6 +520,112 @@ impl ControlHub {
                     }
                 }
                 to_json(loans)
+            }
+            ControlCommand::ListPluginTools => self.handle_list_plugin_tools(&actor).await,
+            ControlCommand::InvokePluginTool {
+                target,
+                plugin_id,
+                tool,
+                args,
+                artifacts,
+                timeout_ms,
+            } => {
+                self.handle_invoke_plugin_tool(
+                    target, plugin_id, tool, args, artifacts, timeout_ms, &actor,
+                )
+                .await
+            }
+            ControlCommand::PollPluginJob {
+                target,
+                job_id,
+                after_seq,
+                wait_ms,
+                limit,
+            } => {
+                self.handle_poll_plugin_job(target, job_id, after_seq, wait_ms, limit, &actor)
+                    .await
+            }
+            ControlCommand::CancelPluginJob { target, job_id } => {
+                self.handle_cancel_plugin_job(target, job_id, &actor).await
+            }
+            ControlCommand::ArtifactBegin {
+                target,
+                name,
+                total_bytes,
+                ttl_ms,
+            } => {
+                self.handle_artifact_begin(target, name, total_bytes, ttl_ms, &actor)
+                    .await
+            }
+            ControlCommand::ArtifactChunk {
+                target,
+                upload_id,
+                offset,
+                data_base64,
+            } => {
+                self.handle_artifact_chunk(target, upload_id, offset, data_base64, &actor)
+                    .await
+            }
+            ControlCommand::ArtifactCommit {
+                target,
+                upload_id,
+                expected_sha256,
+            } => {
+                self.handle_artifact_commit(target, upload_id, expected_sha256, &actor)
+                    .await
+            }
+            ControlCommand::ArtifactAbort { target, upload_id } => {
+                self.handle_artifact_abort(target, upload_id, &actor).await
+            }
+            ControlCommand::ListRemotePluginViews => {
+                self.handle_list_remote_plugin_views(&actor).await
+            }
+            ControlCommand::OpenRemotePluginView {
+                plugin_id,
+                view_id,
+                bound_port_id,
+                params,
+            } => {
+                self.handle_open_remote_plugin_view(
+                    plugin_id,
+                    view_id,
+                    bound_port_id,
+                    params,
+                    &actor,
+                )
+                .await
+            }
+            ControlCommand::SendRemotePluginViewInput {
+                remote_instance_id,
+                kind,
+                mut payload,
+            } => {
+                actor.check_access(Access::DevicePlugins, None)?;
+                enrich_remote_view_input_payload(&self.artifact_store, &kind, &mut payload);
+                let app = self.app_handle().ok_or_else(|| {
+                    HostError::new("host_unavailable", "application window is not ready")
+                })?;
+                self.plugin_bridge
+                    .send_remote_view_input(&app, &remote_instance_id, &kind, payload)
+            }
+            ControlCommand::PollRemotePluginViewEvents {
+                remote_instance_id,
+                after_seq,
+                wait_ms,
+            } => {
+                actor.check_access(Access::DevicePlugins, None)?;
+                to_json(
+                    self.plugin_bridge
+                        .poll_remote_view_events(&remote_instance_id, after_seq, wait_ms)
+                        .await?,
+                )
+            }
+            ControlCommand::CloseRemotePluginView { remote_instance_id } => {
+                actor.check_access(Access::DevicePlugins, None)?;
+                let app = self.app_handle();
+                self.plugin_bridge
+                    .close_remote_view(app.as_ref(), &remote_instance_id)?;
+                Ok(json!({ "closed": true }))
             }
             ControlCommand::RemoteStatus
             | ControlCommand::RemoteStart { .. }
@@ -1231,6 +1351,554 @@ impl ControlHub {
             }
         }
     }
+
+    async fn handle_list_plugin_tools(&self, actor: &Actor) -> Result<Value, HostError> {
+        match actor {
+            Actor::Local { .. } => {
+                let mut tools = self.plugin_bridge.list_local_tools();
+                if let Some(clients) = self.remote_clients() {
+                    tools.extend(clients.list_connected_remote_plugin_tools().await);
+                }
+                to_json(tools)
+            }
+            Actor::Remote { peer, .. } => {
+                actor.check_access(Access::DevicePlugins, None)?;
+                let role = peer.permissions().role;
+                let filtered: Vec<PluginToolDescriptorDto> = self
+                    .plugin_bridge
+                    .list_local_tools()
+                    .into_iter()
+                    .filter(|t| role.allows_tool_access(&t.access))
+                    .collect();
+                to_json(filtered)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_invoke_plugin_tool(
+        &self,
+        target: Option<String>,
+        plugin_id: String,
+        tool: String,
+        args: Value,
+        artifacts: Option<Vec<String>>,
+        timeout_ms: Option<u64>,
+        actor: &Actor,
+    ) -> Result<Value, HostError> {
+        match resolve_target_host(target.as_deref(), actor)? {
+            TargetHost::Remote(profile_id) => {
+                self.forward_to_remote(
+                    profile_id,
+                    ControlCommand::InvokePluginTool {
+                        target: None,
+                        plugin_id,
+                        tool,
+                        args,
+                        artifacts,
+                        timeout_ms,
+                    },
+                )
+                .await
+            }
+            TargetHost::Local => {
+                actor.check_access(Access::DevicePlugins, None)?;
+                let desc = self
+                    .plugin_bridge
+                    .find_local_tool(&plugin_id, &tool)
+                    .ok_or_else(|| {
+                        HostError::new(
+                            "not_found",
+                            format!("plugin tool '{plugin_id}.{tool}' is not available"),
+                        )
+                    })?;
+                if let Actor::Remote { peer, .. } = actor {
+                    if !peer.permissions().role.allows_tool_access(&desc.access) {
+                        return Err(HostError::new(
+                            "forbidden",
+                            format!(
+                                "role '{}' cannot invoke '{}' tool '{plugin_id}.{tool}'",
+                                peer.permissions().role,
+                                desc.access
+                            ),
+                        ));
+                    }
+                    if desc.port_scoped {
+                        if let Some(port_id) = args.get("portId").and_then(Value::as_str) {
+                            let required = match desc.access.as_str() {
+                                "control" => Access::Control,
+                                "write" => Access::Write,
+                                _ => Access::Observe,
+                            };
+                            actor.check_access(required, Some(port_id))?;
+                        }
+                    }
+                }
+                let mut resolved_artifacts = Vec::new();
+                if let Some(ids) = artifacts {
+                    if !ids.is_empty() && !desc.accepts_artifacts {
+                        return Err(HostError::new(
+                            "invalid_request",
+                            format!("plugin tool '{plugin_id}.{tool}' does not accept artifacts"),
+                        ));
+                    }
+                    for id in ids {
+                        let (path, info) = self.artifact_store.resolve(&id).ok_or_else(|| {
+                            HostError::new(
+                                "not_found",
+                                format!("artifact '{id}' not found or expired"),
+                            )
+                        })?;
+                        resolved_artifacts.push(ResolvedArtifactDto {
+                            artifact_id: info.artifact_id,
+                            name: info.name,
+                            path: path.to_string_lossy().into_owned(),
+                            size_bytes: info.size_bytes,
+                            sha256: info.sha256,
+                        });
+                    }
+                }
+                let app = self.app_handle().ok_or_else(|| {
+                    HostError::new("host_unavailable", "application window is not ready")
+                })?;
+                if desc.mode == "job" {
+                    to_json(self.plugin_bridge.start_job(
+                        &app,
+                        &plugin_id,
+                        &desc.install_generation,
+                        &tool,
+                        args,
+                        resolved_artifacts,
+                    )?)
+                } else {
+                    to_json(
+                        self.plugin_bridge
+                            .invoke_sync(
+                                &app,
+                                &plugin_id,
+                                &desc.install_generation,
+                                &tool,
+                                args,
+                                resolved_artifacts,
+                                timeout_ms,
+                            )
+                            .await?,
+                    )
+                }
+            }
+        }
+    }
+
+    async fn handle_poll_plugin_job(
+        &self,
+        target: Option<String>,
+        job_id: String,
+        after_seq: Option<u64>,
+        wait_ms: u64,
+        limit: Option<usize>,
+        actor: &Actor,
+    ) -> Result<Value, HostError> {
+        match resolve_target_host(target.as_deref(), actor)? {
+            TargetHost::Remote(profile_id) => {
+                self.forward_to_remote(
+                    profile_id,
+                    ControlCommand::PollPluginJob {
+                        target: None,
+                        job_id,
+                        after_seq,
+                        wait_ms,
+                        limit,
+                    },
+                )
+                .await
+            }
+            TargetHost::Local => {
+                actor.check_access(Access::DevicePlugins, None)?;
+                to_json(
+                    self.plugin_bridge
+                        .poll_job(&job_id, after_seq, wait_ms, limit)
+                        .await?,
+                )
+            }
+        }
+    }
+
+    async fn handle_cancel_plugin_job(
+        &self,
+        target: Option<String>,
+        job_id: String,
+        actor: &Actor,
+    ) -> Result<Value, HostError> {
+        match resolve_target_host(target.as_deref(), actor)? {
+            TargetHost::Remote(profile_id) => {
+                self.forward_to_remote(
+                    profile_id,
+                    ControlCommand::CancelPluginJob {
+                        target: None,
+                        job_id,
+                    },
+                )
+                .await
+            }
+            TargetHost::Local => {
+                actor.check_access(Access::DevicePlugins, None)?;
+                if let Actor::Remote { peer, .. } = actor {
+                    if let Some((plugin_id, tool)) = self.plugin_bridge.job_plugin_and_tool(&job_id)
+                    {
+                        if let Some(desc) = self.plugin_bridge.find_local_tool(&plugin_id, &tool) {
+                            if !peer.permissions().role.allows_tool_access(&desc.access) {
+                                return Err(HostError::new(
+                                    "forbidden",
+                                    "role is not allowed to cancel that plugin job",
+                                ));
+                            }
+                        }
+                    }
+                }
+                let app = self.app_handle();
+                to_json(self.plugin_bridge.cancel_job(app.as_ref(), &job_id)?)
+            }
+        }
+    }
+
+    async fn handle_artifact_begin(
+        &self,
+        target: Option<String>,
+        name: String,
+        total_bytes: Option<u64>,
+        ttl_ms: Option<u64>,
+        actor: &Actor,
+    ) -> Result<Value, HostError> {
+        match resolve_target_host(target.as_deref(), actor)? {
+            TargetHost::Remote(profile_id) => {
+                self.forward_to_remote(
+                    profile_id,
+                    ControlCommand::ArtifactBegin {
+                        target: None,
+                        name,
+                        total_bytes,
+                        ttl_ms,
+                    },
+                )
+                .await
+            }
+            TargetHost::Local => {
+                check_artifact_access(actor)?;
+                let store = Arc::clone(&self.artifact_store);
+                let upload_id = tokio::task::spawn_blocking(move || {
+                    store.begin(&name, total_bytes, ttl_ms)
+                })
+                .await
+                .map_err(|err| {
+                    HostError::new("host_unavailable", format!("artifact begin panicked: {err}"))
+                })??;
+                Ok(json!({ "uploadId": upload_id }))
+            }
+        }
+    }
+
+    async fn handle_artifact_chunk(
+        &self,
+        target: Option<String>,
+        upload_id: String,
+        offset: u64,
+        data_base64: String,
+        actor: &Actor,
+    ) -> Result<Value, HostError> {
+        match resolve_target_host(target.as_deref(), actor)? {
+            TargetHost::Remote(profile_id) => {
+                self.forward_to_remote(
+                    profile_id,
+                    ControlCommand::ArtifactChunk {
+                        target: None,
+                        upload_id,
+                        offset,
+                        data_base64,
+                    },
+                )
+                .await
+            }
+            TargetHost::Local => {
+                check_artifact_access(actor)?;
+                let bytes = STANDARD.decode(&data_base64).map_err(|_| {
+                    HostError::new("invalid_request", "dataBase64 is not valid base64")
+                })?;
+                let store = Arc::clone(&self.artifact_store);
+                let written = tokio::task::spawn_blocking(move || {
+                    store.write_chunk(&upload_id, offset, &bytes)
+                })
+                .await
+                .map_err(|err| {
+                    HostError::new("host_unavailable", format!("artifact chunk panicked: {err}"))
+                })??;
+                Ok(json!({ "writtenBytes": written }))
+            }
+        }
+    }
+
+    async fn handle_artifact_commit(
+        &self,
+        target: Option<String>,
+        upload_id: String,
+        expected_sha256: Option<String>,
+        actor: &Actor,
+    ) -> Result<Value, HostError> {
+        match resolve_target_host(target.as_deref(), actor)? {
+            TargetHost::Remote(profile_id) => {
+                self.forward_to_remote(
+                    profile_id,
+                    ControlCommand::ArtifactCommit {
+                        target: None,
+                        upload_id,
+                        expected_sha256,
+                    },
+                )
+                .await
+            }
+            TargetHost::Local => {
+                check_artifact_access(actor)?;
+                let store = Arc::clone(&self.artifact_store);
+                let info = tokio::task::spawn_blocking(move || {
+                    store.commit(&upload_id, expected_sha256.as_deref())
+                })
+                .await
+                .map_err(|err| {
+                    HostError::new("host_unavailable", format!("artifact commit panicked: {err}"))
+                })??;
+                to_json(info)
+            }
+        }
+    }
+
+    async fn handle_artifact_abort(
+        &self,
+        target: Option<String>,
+        upload_id: String,
+        actor: &Actor,
+    ) -> Result<Value, HostError> {
+        match resolve_target_host(target.as_deref(), actor)? {
+            TargetHost::Remote(profile_id) => {
+                self.forward_to_remote(
+                    profile_id,
+                    ControlCommand::ArtifactAbort {
+                        target: None,
+                        upload_id,
+                    },
+                )
+                .await
+            }
+            TargetHost::Local => {
+                check_artifact_access(actor)?;
+                let store = Arc::clone(&self.artifact_store);
+                let aborted = tokio::task::spawn_blocking(move || store.abort(&upload_id))
+                    .await
+                    .map_err(|err| {
+                        HostError::new("host_unavailable", format!("artifact abort panicked: {err}"))
+                    })?;
+                Ok(json!({ "aborted": aborted }))
+            }
+        }
+    }
+
+    async fn handle_list_remote_plugin_views(&self, actor: &Actor) -> Result<Value, HostError> {
+        actor.check_access(Access::DevicePlugins, None)?;
+        let Some(app) = self.app_handle() else {
+            return to_json(Vec::<RemotePluginViewEntryDto>::new());
+        };
+        let (plugins_dir, configs) = {
+            let state = app.state::<crate::AppState>();
+            let guard = state
+                .config_manager
+                .lock()
+                .map_err(|err| HostError::new("host_unavailable", err))?;
+            (
+                guard.plugins_dir().to_path_buf(),
+                guard.get_config().entities.plugin_configs.clone(),
+            )
+        };
+        let entries = tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            for entry in configs {
+                if !entry.enabled || !entry.granted_permissions.iter().any(|p| p == "ui:view") {
+                    continue;
+                }
+                let Ok(manifest) = crate::plugin::load_manifest_lite(&plugins_dir.join(&entry.id))
+                else {
+                    continue;
+                };
+                if manifest.id != entry.id
+                    || !manifest.permissions.iter().any(|p| p == "ui:view")
+                {
+                    continue;
+                }
+                let Some(ui) = manifest.ui else {
+                    continue;
+                };
+                for view in ui.views {
+                    if view.is_trusted_web() {
+                        continue;
+                    }
+                    out.push(RemotePluginViewEntryDto {
+                        plugin_id: entry.id.clone(),
+                        plugin_name: manifest.name.clone(),
+                        install_generation: entry.install_generation.clone(),
+                        view_id: view.id,
+                        label: view.label,
+                        mode: "isolated".to_string(),
+                        placements: view.placements,
+                        port_binding: view.port_binding,
+                    });
+                }
+            }
+            out
+        })
+        .await
+        .map_err(|err| {
+            HostError::new("host_unavailable", format!("list plugin views panicked: {err}"))
+        })?;
+        to_json(entries)
+    }
+
+    async fn handle_open_remote_plugin_view(
+        &self,
+        plugin_id: String,
+        view_id: String,
+        bound_port_id: Option<String>,
+        params: Option<Value>,
+        actor: &Actor,
+    ) -> Result<Value, HostError> {
+        actor.check_access(Access::DevicePlugins, None)?;
+        if let Some(ref port_id) = bound_port_id {
+            actor.check_access(Access::Observe, Some(port_id))?;
+        }
+        crate::plugin::validate_plugin_id(&plugin_id)
+            .map_err(|err| HostError::new("invalid_request", err))?;
+        let app = self.app_handle().ok_or_else(|| {
+            HostError::new("host_unavailable", "application window is not ready")
+        })?;
+        let (plugins_dir, entry) = {
+            let state = app.state::<crate::AppState>();
+            let guard = state
+                .config_manager
+                .lock()
+                .map_err(|err| HostError::new("host_unavailable", err))?;
+            let entry = guard
+                .get_config()
+                .entities
+                .plugin_configs
+                .iter()
+                .find(|item| item.id == plugin_id)
+                .cloned()
+                .ok_or_else(|| {
+                    HostError::new("not_found", format!("plugin '{plugin_id}' is not installed"))
+                })?;
+            (guard.plugins_dir().to_path_buf(), entry)
+        };
+        let bridge = Arc::clone(&self.plugin_bridge);
+        let owner_tag = actor.conn_owner().to_string();
+        let app_clone = app.clone();
+        let session = tokio::task::spawn_blocking(move || {
+            let manifest = crate::plugin::load_manifest_lite(&plugins_dir.join(&plugin_id))
+                .map_err(|err| HostError::new("host_unavailable", err))?;
+            bridge.open_remote_view(
+                &app_clone,
+                &plugin_id,
+                &view_id,
+                bound_port_id,
+                params,
+                &plugins_dir,
+                &entry,
+                &manifest,
+                &owner_tag,
+            )
+        })
+        .await
+        .map_err(|err| {
+            HostError::new("host_unavailable", format!("open remote view panicked: {err}"))
+        })??;
+        to_json(session)
+    }
+}
+
+#[derive(Debug)]
+enum TargetHost<'a> {
+    Local,
+    Remote(&'a str),
+}
+
+fn resolve_target_host<'a>(
+    target: Option<&'a str>,
+    actor: &Actor,
+) -> Result<TargetHost<'a>, HostError> {
+    match target {
+        None | Some("local") => Ok(TargetHost::Local),
+        Some(raw) => {
+            let Some(profile_id) = raw.strip_prefix("remote::") else {
+                return Err(HostError::new(
+                    "invalid_request",
+                    "target must be 'local' or 'remote::<profileId>'",
+                ));
+            };
+            ProfileStore::validate_profile_id(profile_id)?;
+            if !actor.is_local() {
+                return Err(HostError::new(
+                    "forbidden",
+                    "remote clients cannot proxy to other remote hosts",
+                ));
+            }
+            Ok(TargetHost::Remote(profile_id))
+        }
+    }
+}
+
+fn check_artifact_access(actor: &Actor) -> Result<(), HostError> {
+    actor.check_access(Access::DevicePlugins, None)?;
+    if !actor.is_local() {
+        actor.check_access(Access::Write, None)?;
+    }
+    Ok(())
+}
+
+fn enrich_remote_view_input_payload(
+    artifact_store: &super::artifacts::ArtifactStore,
+    kind: &str,
+    payload: &mut Value,
+) {
+    if kind != "artifact-picked" {
+        return;
+    }
+    let Some(obj) = payload.as_object_mut() else {
+        return;
+    };
+    let artifact_id = obj
+        .get("artifact")
+        .and_then(|v| v.as_object())
+        .and_then(|a| a.get("artifactId"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let Some(artifact_id) = artifact_id else {
+        return;
+    };
+    match artifact_store.resolve(&artifact_id) {
+        Some((path, info)) => {
+            if let Some(artifact) = obj.get_mut("artifact").and_then(|v| v.as_object_mut()) {
+                artifact.insert(
+                    "path".to_string(),
+                    Value::String(path.to_string_lossy().into_owned()),
+                );
+                artifact.insert("name".to_string(), Value::String(info.name));
+                artifact.insert("sizeBytes".to_string(), Value::from(info.size_bytes));
+                artifact.insert("sha256".to_string(), Value::String(info.sha256));
+            }
+        }
+        None => {
+            obj.remove("artifact");
+            obj.insert(
+                "error".to_string(),
+                Value::String("artifact not found or expired".to_string()),
+            );
+        }
+    }
 }
 
 enum TargetPort<'a> {
@@ -1736,6 +2404,84 @@ mod pure_tests {
             namespaced
         );
     }
+
+    #[test]
+    fn target_host_and_artifact_access_local_work() {
+        let local = Actor::Local {
+            conn_owner: "ipc:1".into(),
+        };
+        assert!(matches!(
+            resolve_target_host(None, &local).unwrap(),
+            TargetHost::Local
+        ));
+        assert!(matches!(
+            resolve_target_host(Some("local"), &local).unwrap(),
+            TargetHost::Local
+        ));
+        assert!(matches!(
+            resolve_target_host(Some("remote::lab-1"), &local).unwrap(),
+            TargetHost::Remote("lab-1")
+        ));
+        assert_eq!(
+            resolve_target_host(Some("bad"), &local).unwrap_err().code,
+            "invalid_request"
+        );
+        assert_eq!(
+            resolve_target_host(Some("remote::"), &local)
+                .unwrap_err()
+                .code,
+            "invalid_request"
+        );
+        assert!(check_artifact_access(&local).is_ok());
+    }
+
+    #[test]
+    fn enrich_remote_view_input_resolves_and_handles_missing_artifacts() {
+        let dir = std::env::temp_dir().join(format!("hc-enrich-{}", Uuid::new_v4()));
+        let store = super::super::artifacts::ArtifactStore::new(dir.clone());
+        let upload_id = store.begin("firmware.bin", Some(5), None).unwrap();
+        store.write_chunk(&upload_id, 0, b"hello").unwrap();
+        let info = store.commit(&upload_id, None).unwrap();
+        let (expected_path, _) = store.resolve(&info.artifact_id).unwrap();
+
+        let mut ok_payload = json!({
+            "requestId": "req-1",
+            "artifact": {
+                "artifactId": info.artifact_id,
+                "name": "tampered.bin",
+                "sizeBytes": 999,
+                "sha256": "wrong",
+            }
+        });
+        enrich_remote_view_input_payload(&store, "artifact-picked", &mut ok_payload);
+        assert_eq!(
+            ok_payload["artifact"]["path"].as_str(),
+            Some(expected_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(ok_payload["artifact"]["name"], "firmware.bin");
+        assert_eq!(ok_payload["artifact"]["sizeBytes"], 5);
+        assert_eq!(ok_payload["artifact"]["sha256"], info.sha256);
+        assert!(ok_payload.get("error").is_none());
+
+        let mut missing_payload = json!({
+            "requestId": "req-2",
+            "artifact": { "artifactId": "missing-id" }
+        });
+        enrich_remote_view_input_payload(&store, "artifact-picked", &mut missing_payload);
+        assert!(missing_payload.get("artifact").is_none());
+        assert_eq!(missing_payload["error"], "artifact not found or expired");
+
+        // Non-artifact-picked kinds remain untouched
+        let mut other_payload = json!({
+            "artifact": { "artifactId": "missing-id" }
+        });
+        let before = other_payload.clone();
+        enrich_remote_view_input_payload(&store, "state", &mut other_payload);
+        assert_eq!(other_payload, before);
+
+        store.cleanup_all();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(all(test, not(windows)))]
@@ -1754,7 +2500,7 @@ mod tests {
                 "remote-caller".into(),
                 RemotePermissions {
                     role: RemoteRole::Control,
-                    ports: vec!["*".into()],
+                    ports: vec!["COM3".into()],
                     allow_loan: true,
                     automation: false,
                     device_plugins: false,
@@ -1900,11 +2646,224 @@ mod tests {
         assert_eq!(hello["features"]["portLease"], true);
         assert_eq!(hello["features"]["remoteTls"], true);
         assert_eq!(hello["features"]["notes"], true);
+        assert_eq!(hello["features"]["pluginTools"], true);
+        assert_eq!(hello["features"]["artifacts"], true);
+        assert_eq!(hello["features"]["remotePluginViews"], true);
 
         let info = hub.dispatch_command(ControlCommand::HostInfo, actor).await.unwrap();
         assert_eq!(info["hostId"], hub.host_id());
         assert_eq!(info["localRunning"], false);
         assert_eq!(info["remote"]["enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn dispatch_enforces_device_plugins_role_and_artifacts() {
+        let dir = std::env::temp_dir().join(format!("hc-devplug-{}", Uuid::new_v4()));
+        let auth = Authority::open(&dir, "127.0.0.1:8443".into()).unwrap();
+        let hub = Arc::new(ControlHub::new(
+            Arc::new(Mutex::new(SerialManager::new())),
+            Arc::new(SerialEventHub::new()),
+            Arc::new(PortLeaseRegistry::new()),
+            Arc::new(LogManager::new()),
+            dir.join("hub"),
+        ));
+
+        hub.plugin_bridge().sync_plugin_tools(vec![
+            PluginToolDescriptorDto {
+                host: "local".into(),
+                host_label: None,
+                plugin_id: "com.example.diag".into(),
+                plugin_name: "Diag".into(),
+                install_generation: "gen-1".into(),
+                tool: "read_info".into(),
+                description: "Observe info".into(),
+                access: "observe".into(),
+                mode: "sync".into(),
+                port_scoped: false,
+                accepts_artifacts: false,
+                input_schema: json!({"type": "object"}),
+            },
+            PluginToolDescriptorDto {
+                host: "local".into(),
+                host_label: None,
+                plugin_id: "com.example.diag".into(),
+                plugin_name: "Diag".into(),
+                install_generation: "gen-1".into(),
+                tool: "flash".into(),
+                description: "Flash firmware".into(),
+                access: "control".into(),
+                mode: "job".into(),
+                port_scoped: true,
+                accepts_artifacts: true,
+                input_schema: json!({"type": "object"}),
+            },
+        ]);
+
+        let mk_actor = |role: RemoteRole, device_plugins: bool| {
+            let invite = auth
+                .invite(
+                    "peer".into(),
+                    RemotePermissions {
+                        role,
+                        ports: vec!["COM3".into()],
+                        allow_loan: false,
+                        automation: false,
+                        device_plugins,
+                        device_tools: false,
+                    },
+                    None,
+                )
+                .unwrap();
+            let profile = auth.pair(&invite.code).unwrap();
+            let peer = auth.authenticate(&profile.client_id, &profile.token).unwrap();
+            Actor::Remote {
+                peer,
+                conn_owner: format!("remote:{}:test", profile.client_id),
+            }
+        };
+
+        let no_plugins = mk_actor(RemoteRole::Control, false);
+        assert_eq!(
+            hub.dispatch_command(ControlCommand::ListPluginTools, no_plugins.clone())
+                .await
+                .unwrap_err()
+                .code,
+            "forbidden"
+        );
+        assert_eq!(
+            hub.dispatch_command(
+                ControlCommand::ArtifactBegin {
+                    target: None,
+                    name: "fw.bin".into(),
+                    total_bytes: Some(4),
+                    ttl_ms: None,
+                },
+                no_plugins,
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "forbidden"
+        );
+
+        let observe_peer = mk_actor(RemoteRole::Observe, true);
+        let tools_val = hub
+            .dispatch_command(ControlCommand::ListPluginTools, observe_peer.clone())
+            .await
+            .unwrap();
+        let tools: Vec<PluginToolDescriptorDto> = serde_json::from_value(tools_val).unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool, "read_info");
+
+        assert_eq!(
+            hub.dispatch_command(
+                ControlCommand::ArtifactBegin {
+                    target: None,
+                    name: "fw.bin".into(),
+                    total_bytes: Some(4),
+                    ttl_ms: None,
+                },
+                observe_peer.clone(),
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "forbidden"
+        );
+        assert_eq!(
+            hub.dispatch_command(
+                ControlCommand::InvokePluginTool {
+                    target: None,
+                    plugin_id: "com.example.diag".into(),
+                    tool: "flash".into(),
+                    args: json!({}),
+                    artifacts: None,
+                    timeout_ms: None,
+                },
+                observe_peer,
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "forbidden"
+        );
+
+        let write_peer = mk_actor(RemoteRole::Write, true);
+        assert_eq!(
+            resolve_target_host(Some("remote::other"), &write_peer)
+                .unwrap_err()
+                .code,
+            "forbidden"
+        );
+        assert_eq!(
+            hub.dispatch_command(
+                ControlCommand::ArtifactBegin {
+                    target: Some("remote::other".into()),
+                    name: "fw.bin".into(),
+                    total_bytes: Some(4),
+                    ttl_ms: None,
+                },
+                write_peer.clone(),
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "forbidden"
+        );
+
+        let begin = hub
+            .dispatch_command(
+                ControlCommand::ArtifactBegin {
+                    target: None,
+                    name: "fw.bin".into(),
+                    total_bytes: Some(4),
+                    ttl_ms: None,
+                },
+                write_peer.clone(),
+            )
+            .await
+            .unwrap();
+        let upload_id = begin["uploadId"].as_str().unwrap().to_string();
+        let chunk = hub
+            .dispatch_command(
+                ControlCommand::ArtifactChunk {
+                    target: None,
+                    upload_id: upload_id.clone(),
+                    offset: 0,
+                    data_base64: STANDARD.encode(b"test"),
+                },
+                write_peer.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(chunk["writtenBytes"], 4);
+        let commit = hub
+            .dispatch_command(
+                ControlCommand::ArtifactCommit {
+                    target: None,
+                    upload_id,
+                    expected_sha256: None,
+                },
+                write_peer,
+            )
+            .await
+            .unwrap();
+        assert_eq!(commit["name"], "fw.bin");
+        assert_eq!(commit["sizeBytes"], 4);
+
+        let local_actor = Actor::Local {
+            conn_owner: "ipc:test".into(),
+        };
+        let local_tools_val = hub
+            .dispatch_command(ControlCommand::ListPluginTools, local_actor)
+            .await
+            .unwrap();
+        let local_tools: Vec<PluginToolDescriptorDto> =
+            serde_json::from_value(local_tools_val).unwrap();
+        assert_eq!(local_tools.len(), 2);
+
+        hub.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
