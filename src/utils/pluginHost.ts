@@ -75,6 +75,16 @@ export function subscribePluginSessions(listener: () => void): () => void {
 function notifySessionListeners(): void {
   for (const listener of sessionListeners) listener();
 }
+
+export type ControlWorkerMessageHandler = (
+  pluginId: string,
+  type: '__control_tool_reply' | '__control_job_event',
+  payload: unknown,
+) => void;
+let controlMessageHandler: ControlWorkerMessageHandler | null = null;
+export function setPluginControlMessageHandler(handler: ControlWorkerMessageHandler | null): void {
+  controlMessageHandler = handler;
+}
 function controlMessageBytes(message: { type: string; payload?: unknown }): number {
   if (!message.type.startsWith('view.')) return 0;
   return new TextEncoder().encode(JSON.stringify(message.payload ?? null)).byteLength;
@@ -100,6 +110,43 @@ function normalizeManifest(value: unknown, pluginId: string): PluginManifestView
   }
   const normalized: Record<string, unknown> = { ...value, entry };
   if (value.requires != null && !strings(value.requires)) return invalid();
+  if (value.hostKind !== undefined && value.hostKind !== null) {
+    if (!['workbench', 'host', 'both'].includes(String(value.hostKind))) return invalid();
+    normalized.hostKind = value.hostKind;
+  } else {
+    normalized.hostKind = undefined;
+  }
+  if (value.tools !== undefined && value.tools !== null) {
+    if (!Array.isArray(value.tools) || value.tools.length > 128) return invalid();
+    const seenToolNames = new Set<string>();
+    normalized.tools = value.tools.map((tool: unknown) => {
+      if (!isObject(tool) || typeof tool.name !== 'string' || !tool.name || tool.name.length > 64 ||
+        !/^[A-Za-z0-9_.-]+$/.test(tool.name) || seenToolNames.has(tool.name) ||
+        typeof tool.description !== 'string' || !tool.description.trim() || tool.description.length > 2048) {
+        return invalid();
+      }
+      seenToolNames.add(tool.name);
+      const access = tool.access ?? 'observe';
+      if (!['observe', 'write', 'control'].includes(String(access))) return invalid();
+      const mode = tool.mode ?? 'sync';
+      if (!['sync', 'job'].includes(String(mode))) return invalid();
+      if (tool.portScoped !== undefined && typeof tool.portScoped !== 'boolean') return invalid();
+      if (tool.acceptsArtifacts !== undefined && typeof tool.acceptsArtifacts !== 'boolean') return invalid();
+      const inputSchema = tool.inputSchema ?? { type: 'object', properties: {} };
+      if (!isObject(inputSchema)) return invalid();
+      return {
+        name: tool.name,
+        description: tool.description,
+        access,
+        mode,
+        portScoped: tool.portScoped === true,
+        acceptsArtifacts: tool.acceptsArtifacts === true,
+        inputSchema,
+      };
+    });
+  } else {
+    normalized.tools = undefined;
+  }
   for (const [scope, member] of [
     ['serial', 'portWhitelist'], ['http', 'urlWhitelist'], ['shell', 'executableWhitelist'],
   ]) {
@@ -239,6 +286,14 @@ export class PluginSession {
   /** 是否已加载（worker 存活）。 */
   get loaded(): boolean {
     return this.worker !== null;
+  }
+
+  isReady(): boolean {
+    return this.worker !== null && this.ready;
+  }
+
+  getManifest(): PluginManifestView | null {
+    return this.manifest;
   }
 
   get epoch(): number { return this.epochBase + this.generation; }
@@ -437,6 +492,9 @@ export class PluginSession {
           this.ready = true;
           this.settleReady();
           this.armHealthCheck();
+          notifySessionListeners();
+        } else if (msg.type === '__control_tool_reply' || msg.type === '__control_job_event') {
+          controlMessageHandler?.(this.pluginId, msg.type, msg.payload);
         } else if (msg.type === '__plugin_error') {
           // Ordinary post-ready async failures are diagnostics; the session lives.
           const reason = msg.payload;
@@ -777,6 +835,35 @@ export class PluginSession {
       return false;
     }
     return this.sendEvent(message, bytes, false, transfer) !== null;
+  }
+
+  /** Dispatch a Control/MCP tool call directly to the ready Worker (bypasses RX drop queues). */
+  invokeControlTool(payload: {
+    requestId: string;
+    tool: string;
+    args: unknown;
+    artifacts: unknown[];
+    mode: 'sync' | 'job';
+    jobId: string | null;
+  }): boolean {
+    if (!this.worker || !this.ready) return false;
+    try {
+      this.worker.postMessage({ type: '__control_tool_invoke', payload });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Request cancellation of an active Control/MCP job on the Worker. */
+  cancelControlJob(jobId: string): boolean {
+    if (!this.worker) return false;
+    try {
+      this.worker.postMessage({ type: '__control_job_cancel', payload: { jobId } });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Admit directly to this Worker or return busy; never queue for retry in the

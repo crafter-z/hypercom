@@ -83,6 +83,7 @@ export function parseSessionSnapshot(value: unknown, availablePortIds: ReadonlyS
       tabs.push({ ...common, kind: 'serial', portId });
       serialPorts.add(portId);
     } else if (tab.kind === 'plugin') {
+      if (tab.remoteProfileId !== undefined) continue;
       if (typeof tab.pluginId !== 'string' || !tab.pluginId || typeof tab.installGeneration !== 'string' || !tab.installGeneration || typeof tab.viewId !== 'string' || !tab.viewId || typeof tab.instanceKey !== 'string' || tab.restoreOnStartup !== true || !(tab.boundPortId === null || (typeof tab.boundPortId === 'string' && tab.boundPortId.length > 0))) continue;
       const key = JSON.stringify([tab.pluginId, tab.installGeneration, tab.viewId, tab.boundPortId, tab.instanceKey]);
       const count = pluginCounts.get(tab.pluginId) ?? 0;
@@ -155,6 +156,7 @@ export function buildSessionSnapshot(state: AppStoreState): string | null {
   const plugins = getPluginViews();
   const tabs = state.tabs.filter((tab) => {
     if (tab.kind === 'serial' || tab.kind === 'replay') return true;
+    if (tab.remoteProfileId) return false;
     const plugin = plugins.find((item) => item.id === tab.pluginId && item.installGeneration === tab.installGeneration);
     const declaration = plugin?.manifest?.ui?.views?.find((item) => item.id === tab.viewId);
     return tab.restoreOnStartup && (!plugin?.manifest || (declaration?.restoreOnStartup === true && declaration.placements.includes('workspace-tab')));

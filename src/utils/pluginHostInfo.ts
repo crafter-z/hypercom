@@ -31,6 +31,12 @@ export interface PluginHostInfo {
     readonly serialLoan: boolean;
     /** `plugin.serial.loan` 显式串口租约控制（acquire / heartbeat / release）。 */
     readonly portLease: boolean;
+    /** `plugin.tools.register` 声明与暴露 Control/MCP 工具。 */
+    readonly pluginTools: boolean;
+    /** 允许本地工作台插件与视图绑定 `remote::` 远端端口。 */
+    readonly remotePorts: boolean;
+    /** 支持通过工作流与投影视图传递 Artifact 文件引用。 */
+    readonly artifacts: boolean;
     // 未来能力在这里增量添加；不要复用/改变已有字段语义。
   };
 }
@@ -38,5 +44,11 @@ export interface PluginHostInfo {
 /** 当前宿主构建的能力描述。返回值会被结构化克隆，插件得到普通对象。 */
 export const PLUGIN_HOST_INFO: PluginHostInfo = Object.freeze({
   apiVersion: PLUGIN_HOST_API_VERSION,
-  features: Object.freeze({ serialLoan: true, portLease: true }),
+  features: Object.freeze({
+    serialLoan: true,
+    portLease: true,
+    pluginTools: true,
+    remotePorts: true,
+    artifacts: true,
+  }),
 });

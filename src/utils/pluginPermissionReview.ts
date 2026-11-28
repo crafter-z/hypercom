@@ -5,7 +5,7 @@ const permissionReviewGroups: Readonly<Record<string, readonly string[]>> = {
   observe: ['terminal:read', 'rx:bytes'],
   device: ['serial:send', 'serial:control'],
   files: ['fs:assets', 'fs:storage', 'fs:open', 'fs:open-dir', 'fs:export-dir', 'fs:save', 'fs:write-dir'],
-  external: ['http:request', 'shell:open', 'shell:execute', 'clipboard'],
+  external: ['http:request', 'shell:open', 'shell:execute', 'clipboard', 'control:expose'],
   workspace: ['terminal:write', 'notify', 'storage', 'ui:view', 'ui:tabs'],
 };
 

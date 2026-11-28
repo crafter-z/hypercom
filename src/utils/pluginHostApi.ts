@@ -58,6 +58,9 @@ export interface PluginPortView {
   baudRate?: number;
   /** Authoritative native generation; close uses this as a CAS, not as port identity. */
   connectionGeneration: number;
+  isRemote?: boolean;
+  remoteRole?: string;
+  remoteAllowLoan?: boolean;
 }
 
 function portView(port: {
@@ -69,6 +72,9 @@ function portView(port: {
   baudRate?: number;
   /** Authoritative native generation; close uses this as a CAS, not as port identity. */
   connectionGeneration: number;
+  isRemote?: boolean;
+  remoteRole?: string;
+  remoteAllowLoan?: boolean;
 }): PluginPortView {
   return {
     id: port.id,
@@ -79,7 +85,26 @@ function portView(port: {
     mode: useAppStore.getState().ports.find(item => item.id === port.id)?.mode ?? port.mode,
     baudRate: port.baudRate,
     connectionGeneration: port.connectionGeneration,
+    ...(port.isRemote !== undefined ? { isRemote: port.isRemote } : {}),
+    ...(port.remoteRole !== undefined ? { remoteRole: port.remoteRole } : {}),
+    ...(port.remoteAllowLoan !== undefined ? { remoteAllowLoan: port.remoteAllowLoan } : {}),
   };
+}
+
+export interface RemoteProxyViewHandler {
+  isRemoteViewInstance: (instanceId: string) => boolean;
+  execute: (
+    pluginId: string,
+    op: 'view.publish' | 'view.sendBinary' | 'view.pickClientArtifact',
+    args: unknown,
+    beforeSend?: () => void,
+  ) => Promise<unknown>;
+}
+
+let remoteProxyViewHandler: RemoteProxyViewHandler | null = null;
+
+export function registerRemoteProxyViewHandler(handler: RemoteProxyViewHandler | null): void {
+  remoteProxyViewHandler = handler;
 }
 
 /** notify 的 level → toast severity 映射（设计 §5 notify({level})）。 */
@@ -264,8 +289,18 @@ export async function executeHostApi(
         : fsContext.readRanges(requestId, ranges, priority, assertAuthority);
     }
     case 'view.publish':
-    case 'view.sendSerial':
     case 'view.sendBinary':
+    case 'view.pickClientArtifact': {
+      const instanceId = args !== null && typeof args === 'object' && !Array.isArray(args) && 'instanceId' in args
+        && typeof (args as { instanceId?: unknown }).instanceId === 'string'
+        ? (args as { instanceId: string }).instanceId
+        : null;
+      if (instanceId && remoteProxyViewHandler?.isRemoteViewInstance(instanceId)) {
+        return remoteProxyViewHandler.execute(pluginId, op, args, beforeSend);
+      }
+      return executePluginViewApi(pluginId, op, args, manifest, beforeSend);
+    }
+    case 'view.sendSerial':
     case 'tabs.open':
     case 'tabs.activate':
     case 'tabs.close':
@@ -680,6 +715,8 @@ export async function executeHostApi(
     case 'rx.onLine':
     case 'rx.onBytes':
       throw new Error('请使用 plugin.rx.onLine/onBytes(callback) 订阅事件');
+    case 'control.jobEvent':
+      throw new Error('请使用 plugin.tools.register 上下文报告任务事件');
     default:
       if (Object.prototype.hasOwnProperty.call(OP_PERMISSIONS, op)) {
         throw new Error(`宿主 API 不支持: ${op}`);

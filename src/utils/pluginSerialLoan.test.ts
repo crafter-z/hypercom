@@ -107,7 +107,7 @@ describe('serial.loan service wrappers', () => {
 describe('serial.loan permissions, host.info, and RPC deadline', () => {
   it('exposes portLease alongside serialLoan in host.info', async () => {
     const info = await executeHostApi(PLUGIN_ID, 'host.info', null);
-    expect(info).toEqual({
+    expect(info).toMatchObject({
       apiVersion: 1,
       features: { serialLoan: true, portLease: true },
     });

@@ -1,13 +1,15 @@
 import { useAppStore, getTabPortId } from '../stores/useAppStore';
 import { useSystemStore } from '../stores/useSystemStore';
-import type { PluginConfigEntry, PluginManifestView, PluginView, PortMetaEntry, TabItem } from '../types';
+import type { PluginConfigEntry, PluginManifestView, PluginTabItem, PluginView, PortMetaEntry, TabItem } from '../types';
 import { RETRIABLE_PLUGIN_VIEW_FAILURES } from '../types/pluginViews';
-import type { PluginViewBinding, PluginViewDeclaration, PluginViewEnvironment, PluginViewFailureCode, PluginViewPreference, PluginViewRect, PluginViewportRect, PluginViewState, PluginTabOpenOptions, PluginNativeMessage, PluginViewHostMessage, PluginViewInteractionStatus } from '../types/pluginViews';
+import type { PluginViewBinding, PluginViewDeclaration, PluginViewEnvironment, PluginViewFailureCode, PluginViewPreference, PluginViewRect, PluginViewportRect, PluginViewState, PluginTabOpenOptions, PluginNativeMessage, PluginViewHostMessage, PluginViewInteractionStatus, RemotePluginViewOpenOptions } from '../types/pluginViews';
 import { getPluginViews, subscribePluginViews } from './pluginConfigSnapshot';
 import { pluginHost, subscribePluginSessions, type PluginSession } from './pluginHost';
 import { PluginTimeline } from './pluginTimeline';
 import { ViewBinaryReceiver, ViewBinarySender, viewBinaryBudget, type ViewBinaryAbort } from './pluginViewBinary';
 import { pluginViewService } from '../services/pluginView';
+import { controlService, fileService } from '../services/tauri';
+import { acquirePluginDialog } from './pluginDialogBudget';
 import { subscribePluginViewInput } from './pluginViewInput';
 import { collectLeaves, findLeafById } from './paneTree';
 import { sendToPort } from '../hooks/useSerialSend';
@@ -50,11 +52,19 @@ type ViewBinarySession = PluginSession & {
   cancelViewBinary?: (instanceId: string, documentId: string) => void;
 };
 
+interface RemoteViewRecordState {
+  profileId: string;
+  remoteInstanceId: string | null;
+  pollAbort: AbortController;
+  pendingBinaryChunks: PluginViewHostMessage[];
+}
+
 interface ViewRecord {
   binding: PluginViewBinding;
   declaration: PluginViewDeclaration;
   /** Independent trusted pages never construct, subscribe, or wait for a Worker. */
   usesWorker: boolean;
+  remote?: RemoteViewRecordState;
   documentId: string | null;
   binarySender: ViewBinarySender | null;
   binaryReceiver: ViewBinaryReceiver | null;
@@ -267,6 +277,7 @@ function migrateRememberedPages(tabs: TabItem[]): boolean {
   let migrated = false;
   const present = new Set<string>();
   for (const tab of tabs) {
+    if (tab.kind === 'plugin' && tab.remoteProfileId) continue;
     const stored = preferenceFor(tab);
     if (!stored) continue;
     const key = identity(tab, stored);
@@ -302,7 +313,7 @@ export function getAvailablePluginViews(portId: string | null, placement: Plugin
   return result;
 }
 function identity(tab: TabItem, preference: PluginViewPreference): string {
-  return JSON.stringify([tab.id, preference.pluginId, preference.installGeneration, preference.viewId, getTabPortId(tab)]);
+  return JSON.stringify([tab.id, preference.pluginId, preference.installGeneration, preference.viewId, getTabPortId(tab), tab.kind === 'plugin' ? (tab.remoteProfileId ?? null) : null]);
 }
 function live(record: ViewRecord): boolean { return record.alive && records.get(record.binding.tabId) === record; }
 function environment(record: ViewRecord): PluginViewEnvironment {
@@ -421,6 +432,24 @@ function handleUiInteraction(record: ViewRecord, documentId: string, message: Pl
   };
   if (message.type === 'interaction-busy') { acknowledge('busy'); return; }
   if (typeof messageType !== 'string' || !messageType || messageType.length > 128) throw new Error('invalid UI message');
+  if (record.remote) {
+    if (!record.remote.remoteInstanceId) { acknowledge('unavailable'); return; }
+    if (!record.nativeReady) { acknowledge('busy'); return; }
+    const now = Date.now();
+    record.interactionTokens = Math.min(32, record.interactionTokens + Math.max(0, now - record.interactionTime) * 0.03);
+    record.interactionTime = now;
+    if (record.interactionTokens < 1) { acknowledge('busy'); return; }
+    record.interactionTokens--;
+    jsonBytes(message.payload ?? null, 16 * 1024);
+    const { profileId, remoteInstanceId } = record.remote;
+    void controlService.remoteSendPluginViewInput({
+      profileId,
+      remoteInstanceId,
+      kind: interaction,
+      payload: { type: messageType, payload: message.payload ?? null },
+    }).then(() => acknowledge('accepted'), () => acknowledge('unavailable'));
+    return;
+  }
   const worker = pluginHost.get(record.binding.pluginId);
   if (!record.usesWorker || !worker?.loaded || worker.epoch !== record.binding.workerEpoch || !record.interactionDocumentRouted) {
     acknowledge('unavailable'); return;
@@ -445,6 +474,13 @@ function retire(record: ViewRecord, reason: string | Error | null): void {
   clearTimer(record, 'readyTimer'); clearTimer(record, 'ackTimer'); clearTimer(record, 'flushTimer');
   clearTimer(record, 'workerReadyTimer'); clearTimer(record, 'navigationReadyTimer');
   record.unsubscribeInput?.(); record.unsubscribeInput = null;
+  if (record.remote) {
+    record.remote.pollAbort.abort();
+    record.remote.pendingBinaryChunks.length = 0;
+    if (record.remote.remoteInstanceId) {
+      void controlService.remoteClosePluginView(record.remote.profileId, record.remote.remoteInstanceId).catch(() => {});
+    }
+  }
   if (record.usesWorker && record.documentId) {
     (pluginHost.get(record.binding.pluginId) as ViewBinarySession | null)
       ?.cancelViewBinary?.(record.binding.viewInstanceId, record.documentId);
@@ -524,7 +560,7 @@ function pendingBytes(pluginId: string): number {
   return total;
 }
 function flush(record: ViewRecord): void {
-  if (!record.usesWorker || !live(record) || !record.nativeReady || !record.workerReady || !record.visible || overlayBlocked || record.inFlight || !record.latest || !record.documentId) return;
+  if ((!record.usesWorker && !record.remote) || !live(record) || !record.nativeReady || !record.workerReady || !record.visible || overlayBlocked || record.inFlight || !record.latest || !record.documentId) return;
   const remaining = 34 - (Date.now() - record.lastSentAt);
   if (remaining > 0) {
     if (record.flushTimer === null) record.flushTimer = setTimeout(() => { record.flushTimer = null; flush(record); }, remaining);
@@ -582,6 +618,234 @@ async function createRecord(tab: TabItem, preference: PluginViewPreference, view
     if (record.rect) await place(record);
   } catch (error) { fail(record, error); }
 }
+
+async function handleRemoteArtifactPick(
+  record: ViewRecord,
+  profileId: string,
+  remoteInstanceId: string,
+  payload: unknown,
+): Promise<void> {
+  const obj = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+  const requestId = typeof obj.requestId === 'string' ? obj.requestId : '';
+  if (!requestId) return;
+  const opts = obj.options && typeof obj.options === 'object' && !Array.isArray(obj.options)
+    ? obj.options as { title?: unknown; filters?: unknown }
+    : {};
+  const title = typeof opts.title === 'string' ? opts.title : undefined;
+  const filters = Array.isArray(opts.filters)
+    ? opts.filters.filter((f): f is { name: string; extensions: string[] } =>
+      !!f && typeof f === 'object' && typeof (f as { name?: unknown }).name === 'string' &&
+      Array.isArray((f as { extensions?: unknown }).extensions) &&
+      (f as { extensions: unknown[] }).extensions.every(ext => typeof ext === 'string'))
+    : undefined;
+  try {
+    const artifact = await controlService.remotePickAndUploadArtifact({ profileId, title, filters });
+    await controlService.remoteSendPluginViewInput({
+      profileId,
+      remoteInstanceId,
+      kind: 'artifact-picked',
+      payload: { requestId, artifact },
+    });
+  } catch (error) {
+    if (!live(record)) return;
+    await controlService.remoteSendPluginViewInput({
+      profileId,
+      remoteInstanceId,
+      kind: 'artifact-picked',
+      payload: { requestId, artifact: null, error: errorText(error) },
+    }).catch(() => {});
+  }
+}
+
+async function pollRemoteEvents(record: ViewRecord): Promise<void> {
+  const remote = record.remote;
+  if (!remote || !remote.remoteInstanceId) return;
+  const { profileId, remoteInstanceId, pollAbort } = remote;
+  let afterSeq: number | undefined;
+  let consecutiveErrors = 0;
+
+  while (live(record) && !pollAbort.signal.aborted) {
+    try {
+      const page = await controlService.remotePollPluginViewEvents({
+        profileId,
+        remoteInstanceId,
+        afterSeq,
+        waitMs: 800,
+      });
+      consecutiveErrors = 0;
+      if (!live(record) || pollAbort.signal.aborted) break;
+
+      for (const ev of page.events) {
+        if (!live(record) || pollAbort.signal.aborted) break;
+        if (ev.kind === 'state') {
+          const obj = ev.payload && typeof ev.payload === 'object' && !Array.isArray(ev.payload)
+            ? ev.payload as { snapshot?: unknown }
+            : null;
+          const snapshot = obj && 'snapshot' in obj ? obj.snapshot : ev.payload;
+          const normalized = boundedPluginViewJson(snapshot, MAX_SNAPSHOT_BYTES);
+          record.retained = { snapshot: normalized.value, bytes: normalized.bytes };
+          record.latest = record.retained;
+          flush(record);
+        } else if (ev.kind === 'binary') {
+          const obj = ev.payload && typeof ev.payload === 'object' && !Array.isArray(ev.payload)
+            ? ev.payload as { transferId?: unknown; transferType?: unknown; seq?: unknown; done?: unknown; data?: unknown }
+            : null;
+          if (obj && typeof obj.transferId === 'string' && typeof obj.transferType === 'string' &&
+            typeof obj.seq === 'number' && typeof obj.done === 'boolean' && typeof obj.data === 'string') {
+            const chunkMsg: PluginViewHostMessage = {
+              type: 'binary-chunk',
+              documentId: record.documentId ?? '',
+              transferId: obj.transferId,
+              transferType: obj.transferType,
+              seq: obj.seq,
+              done: obj.done,
+              data: obj.data,
+            };
+            if (record.nativeReady && record.documentId) {
+              void pluginViewService.send(record.binding.viewInstanceId, chunkMsg).catch(error => {
+                if (live(record)) fail(record, error);
+              });
+            } else {
+              remote.pendingBinaryChunks.push(chunkMsg);
+            }
+          }
+        } else if (ev.kind === 'pick-artifact') {
+          void handleRemoteArtifactPick(record, profileId, remoteInstanceId, ev.payload);
+        } else if (ev.kind === 'error') {
+          const obj = ev.payload && typeof ev.payload === 'object' ? ev.payload as { error?: unknown } : null;
+          fail(record, typeof obj?.error === 'string' ? obj.error : 'remote plugin view failed');
+          return;
+        } else if (ev.kind === 'closed') {
+          fail(record, failure('runtime', 'remote plugin view closed'));
+          return;
+        }
+      }
+
+      afterSeq = page.nextSeq;
+      if (page.closed) {
+        fail(record, failure('runtime', 'remote plugin view closed'));
+        return;
+      }
+    } catch (error) {
+      if (!live(record) || pollAbort.signal.aborted) break;
+      consecutiveErrors++;
+      if (consecutiveErrors >= 3) {
+        fail(record, error);
+        return;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 300));
+    }
+  }
+}
+
+async function createRemoteRecord(tab: PluginTabItem): Promise<void> {
+  const profileId = tab.remoteProfileId;
+  if (!profileId) return;
+  if (records.size >= MAX_ALL || [...records.values()].filter(record => record.binding.pluginId === tab.pluginId).length >= MAX_PER_PLUGIN) {
+    setState(tab.id, unavailableState(failure('capacity', 'plugin view instance capacity exceeded')));
+    return;
+  }
+  const tabSessionId = tabSessions.get(tab.id) ?? crypto.randomUUID();
+  tabSessions.set(tab.id, tabSessionId);
+  const portId = tab.boundPortId;
+  const binding: PluginViewBinding = {
+    pluginId: tab.pluginId,
+    installGeneration: tab.installGeneration,
+    viewId: tab.viewId,
+    tabId: tab.id,
+    placement: 'workspace-tab',
+    boundPortId: portId,
+    portMode: portId ? useAppStore.getState().ports.find(port => port.id === portId)?.mode ?? 'trx' : null,
+    tabSessionId,
+    viewInstanceId: crypto.randomUUID(),
+    workerEpoch: 1,
+    streamEpoch: 0,
+  };
+  const declaration: PluginViewDeclaration = {
+    id: tab.viewId,
+    label: tab.title,
+    entry: 'ui.js',
+    mode: 'isolated',
+    worker: true,
+    styles: [],
+    assets: [],
+    modes: ['trx', 'tty'],
+    input: 'none',
+    placements: ['workspace-tab'],
+    portBinding: 'optional',
+    restoreOnStartup: false,
+  };
+  const remoteState: RemoteViewRecordState = {
+    profileId,
+    remoteInstanceId: null,
+    pollAbort: new AbortController(),
+    pendingBinaryChunks: [],
+  };
+  const record: ViewRecord = {
+    binding,
+    declaration,
+    usesWorker: false,
+    remote: remoteState,
+    documentId: null,
+    binarySender: null,
+    binaryReceiver: null,
+    timeline: null,
+    alive: true,
+    nativeCreated: false,
+    nativeReady: false,
+    nativeInitializing: false,
+    workerReady: true,
+    retirement: null,
+    visible: false,
+    rect: null,
+    layoutRevision: 0,
+    revision: 0,
+    inFlight: null,
+    latest: null,
+    retained: null,
+    readyTimer: null,
+    navigationReadyTimer: null,
+    workerReadyTimer: null,
+    ackTimer: null,
+    flushTimer: null,
+    lastSentAt: 0,
+    unsubscribeInput: null,
+    interactionTokens: 32,
+    interactionTime: Date.now(),
+    interactionDocumentRouted: false,
+    lastEnvironment: '',
+  };
+  records.set(tab.id, record);
+  setState(tab.id, { status: 'loading', error: null, instanceId: binding.viewInstanceId, code: null });
+
+  try {
+    const sessionDto = await controlService.remoteOpenPluginView({
+      profileId,
+      pluginId: tab.pluginId,
+      viewId: tab.viewId,
+      boundPortId: portId,
+      params: openParams.get(tab.id) ?? null,
+    });
+    if (!live(record) || remoteState.pollAbort.signal.aborted) {
+      void controlService.remoteClosePluginView(profileId, sessionDto.remoteInstanceId).catch(() => {});
+      return;
+    }
+    remoteState.remoteInstanceId = sessionDto.remoteInstanceId;
+    await pluginViewService.createProjected(binding, sessionDto);
+    if (!live(record) || remoteState.pollAbort.signal.aborted) {
+      await pluginViewService.destroy(binding.viewInstanceId);
+      return;
+    }
+    record.nativeCreated = true;
+    if (!record.nativeReady && !record.nativeInitializing) {
+      record.readyTimer = setTimeout(() => fail(record, failure('init-timeout', 'plugin UI initialization timed out')), 5000);
+    }
+    if (record.rect) await place(record);
+    void pollRemoteEvents(record);
+  } catch (error) {
+    fail(record, error);
+  }
+}
 function queueReconcile(): void {
   if (!started || reconcileQueued) return;
   reconcileQueued = true;
@@ -600,9 +864,17 @@ function reconcile(): void {
     const preference = tab && preferenceFor(tab);
     if (!tab || !preference) { retire(record, null); continue; }
     try {
+      if (tab.kind === 'plugin' && tab.remoteProfileId) {
+        if (!record.remote || identity(tab, preference) !== JSON.stringify([record.binding.tabId, record.binding.pluginId, record.binding.installGeneration, record.binding.viewId, record.binding.boundPortId, record.remote.profileId])) {
+          retire(record, null);
+          continue;
+        }
+        void sendEnvironment(record).catch(error => fail(record, error));
+        continue;
+      }
       const placement = tab.kind === 'serial' ? 'serial-content' : 'workspace-tab';
       eligible(preference, getTabPortId(tab), placement);
-      if (identity(tab, preference) !== JSON.stringify([record.binding.tabId, record.binding.pluginId, record.binding.installGeneration, record.binding.viewId, record.binding.boundPortId])) { retire(record, null); continue; }
+      if (identity(tab, preference) !== JSON.stringify([record.binding.tabId, record.binding.pluginId, record.binding.installGeneration, record.binding.viewId, record.binding.boundPortId, null])) { retire(record, null); continue; }
       if (record.usesWorker) {
         const worker = pluginHost.get(preference.pluginId);
         if (!worker?.loaded || worker.epoch !== record.binding.workerEpoch) { retire(record, failure('worker-stopped', 'plugin Worker stopped')); continue; }
@@ -621,6 +893,10 @@ function reconcile(): void {
     if (!preference || records.has(tab.id)) continue;
     const key = identity(tab, preference);
     if (failures.has(key)) continue;
+    if (tab.kind === 'plugin' && tab.remoteProfileId) {
+      void createRemoteRecord(tab);
+      continue;
+    }
     try {
       const { plugin, view } = eligible(preference, getTabPortId(tab), tab.kind === 'serial' ? 'serial-content' : 'workspace-tab');
       if (tab.kind === 'plugin' && !openParams.has(tab.id) && !view.restoreOnStartup) throw failure('view-missing', 'plugin view cannot restore automatically');
@@ -777,6 +1053,52 @@ export function openPluginTabForUser(preference: PluginViewPreference, portId: s
   }
   return openTabFor(preference.pluginId, { viewId: preference.viewId, portId, instanceKey: selectedInstanceKey }, true).tabId;
 }
+
+export function openRemotePluginViewTab(options: RemotePluginViewOpenOptions): string {
+  const boundPortId = options.boundPortId ?? null;
+  const state = useAppStore.getState();
+  const existing = state.tabs.find(
+    (tab): tab is PluginTabItem =>
+      tab.kind === 'plugin'
+      && tab.remoteProfileId === options.profileId
+      && tab.pluginId === options.pluginId
+      && tab.viewId === options.viewId
+      && tab.boundPortId === boundPortId,
+  );
+  if (existing) {
+    state.setActiveTab(existing.id);
+    return existing.id;
+  }
+
+  const ownCount = state.tabs.filter(tab => tab.kind === 'plugin' && tab.pluginId === options.pluginId).length;
+  const allCount = state.tabs.filter(tab => tab.kind === 'plugin').length;
+  const serialPreferences = state.tabs.filter(tab => tab.kind === 'serial' && preferenceFor(tab));
+  const declaredCount = allCount + serialPreferences.length;
+  const ownDeclaredCount = ownCount + serialPreferences.filter(tab => preferenceFor(tab)?.pluginId === options.pluginId).length;
+  if (ownDeclaredCount >= MAX_PER_PLUGIN || declaredCount >= MAX_ALL) {
+    throw new Error('plugin tab capacity exceeded');
+  }
+
+  const paneId = findLeafById(state.paneTree, state.focusedPaneId)?.id ?? collectLeaves(state.paneTree)[0]?.id;
+  const tabId = state.addPluginTab({
+    kind: 'plugin',
+    pluginId: options.pluginId,
+    installGeneration: options.installGeneration,
+    viewId: options.viewId,
+    boundPortId,
+    instanceKey: `remote:${options.profileId}`,
+    restoreOnStartup: false,
+    title: options.label,
+    remoteProfileId: options.profileId,
+    remoteHostLabel: options.hostLabel,
+    remotePluginName: options.pluginName,
+  }, { paneId, activate: true });
+
+  const initialParams = options.params === undefined ? null : boundedPluginViewJson(options.params, 16 * 1024).value;
+  openParams.set(tabId, initialParams);
+  queueReconcile();
+  return tabId;
+}
 export function dismissPluginTab(tabId: string): void {
   const tab = useAppStore.getState().tabs.find(item => item.id === tabId);
   if (tab?.kind === 'plugin') {
@@ -856,13 +1178,49 @@ export async function executePluginViewApi(pluginId: string, op: string, args: u
     const bytesWritten = await sendToPort(portId, data, object.isHex === true, typeof object.lineEnding === 'string' ? object.lineEnding : 'None', true, authorizeSend);
     return { bytesWritten };
   }
+  if (op === 'view.pickClientArtifact') {
+    const rawOptions = object.options && typeof object.options === 'object' && !Array.isArray(object.options)
+      ? object.options as Record<string, unknown>
+      : {};
+    const title = typeof rawOptions.title === 'string' ? rawOptions.title.slice(0, 256) : undefined;
+    const filters = Array.isArray(rawOptions.filters)
+      ? rawOptions.filters.filter((f): f is { name: string; extensions: string[] } =>
+        !!f && typeof f === 'object' && !Array.isArray(f) &&
+        typeof (f as { name?: unknown }).name === 'string' &&
+        Array.isArray((f as { extensions?: unknown }).extensions) &&
+        (f as { extensions: unknown[] }).extensions.every(ext => typeof ext === 'string')).slice(0, 32)
+      : undefined;
+    const releaseDialog = acquirePluginDialog(pluginId);
+    try {
+      const selected = await fileService.pickPluginFiles(pluginId, { multiple: false, title, filters });
+      beforeSend?.();
+      const first = selected.files[0];
+      if (!first) return null;
+      const decoded = atob(first.base64);
+      const bytes = new Uint8Array(decoded.length);
+      for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
+      const digest = await crypto.subtle.digest('SHA-256', bytes);
+      const sha256 = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+      const parts = first.path.split(/[\\/]/);
+      const name = parts[parts.length - 1] || first.path;
+      return {
+        artifactId: crypto.randomUUID(),
+        name,
+        path: first.path,
+        sizeBytes: bytes.byteLength,
+        sha256,
+      };
+    } finally {
+      releaseDialog();
+    }
+  }
   throw new Error('unknown plugin view operation');
 }
 async function handleNative(message: PluginNativeMessage): Promise<void> {
   const record = [...records.values()].find(item => item.binding.viewInstanceId === message.instanceId);
   if (!record || !live(record)) return;
   try {
-    ownedRecord(record.binding.pluginId, { instanceId: message.instanceId });
+    if (!record.remote) ownedRecord(record.binding.pluginId, { instanceId: message.instanceId });
     const documentId = typeof message.documentId === 'string' && message.documentId ? message.documentId : null;
     if (message.type === 'document') {
       if (documentId) beginDocument(record, documentId);
@@ -894,6 +1252,14 @@ async function handleNative(message: PluginNativeMessage): Promise<void> {
       await place(record);
       flush(record);
       record.binarySender?.pump();
+      if (record.remote && record.remote.pendingBinaryChunks.length > 0) {
+        const queued = record.remote.pendingBinaryChunks.splice(0);
+        for (const chunk of queued) {
+          void pluginViewService.send(record.binding.viewInstanceId, { ...chunk, documentId }).catch(error => {
+            if (live(record) && record.documentId === documentId) fail(record, error);
+          });
+        }
+      }
       return;
     }
     // Process failures can surface before the first document exists; they are
@@ -924,6 +1290,30 @@ async function handleNative(message: PluginNativeMessage): Promise<void> {
       if (!record.nativeReady) return;
       if (typeof message.transferId !== 'string' || typeof message.seq !== 'number' || typeof message.done !== 'boolean'
         || typeof message.transferType !== 'string' || typeof message.data !== 'string') return;
+      if (record.remote) {
+        if (!record.remote.remoteInstanceId) {
+          acknowledgeUiBinary(record, message, false, 'remote view not ready');
+          return;
+        }
+        const { profileId, remoteInstanceId } = record.remote;
+        void controlService.remoteSendPluginViewInput({
+          profileId,
+          remoteInstanceId,
+          kind: 'binary',
+          payload: {
+            transferId: message.transferId,
+            transferType: message.transferType,
+            seq: message.seq,
+            done: message.done,
+            data: message.data,
+          },
+        }).then(() => {
+          if (live(record) && record.documentId === documentId) acknowledgeUiBinary(record, message, true);
+        }, (error) => {
+          if (live(record) && record.documentId === documentId) acknowledgeUiBinary(record, message, false, errorText(error));
+        });
+        return;
+      }
       if (!record.usesWorker) { acknowledgeUiBinary(record, message, false, 'plugin view has no Worker binary peer'); return; }
       const receiver = binaryReceiverFor(record);
       const received = receiver.push({

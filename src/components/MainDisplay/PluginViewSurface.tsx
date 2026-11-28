@@ -35,8 +35,11 @@ const PluginViewSurface: React.FC<Props> = ({ tab, hidden }) => {
   const bodyRef = useRef<HTMLDivElement>(null);
   const preference = getTabViewPreference(tab);
   const portId = getTabPortId(tab);
+  const isRemoteProjected = tab.kind === 'plugin' && Boolean(tab.remoteProfileId);
   const pluginName = tab.kind === 'plugin'
-    ? (getPluginViews().find(plugin => plugin.id === tab.pluginId)?.manifest?.name ?? tab.pluginId)
+    ? (isRemoteProjected
+      ? `[${tab.remoteHostLabel || tab.remoteProfileId}] ${tab.remotePluginName || tab.pluginId}`
+      : (getPluginViews().find(plugin => plugin.id === tab.pluginId)?.manifest?.name ?? tab.pluginId))
     : null;
   const pluginEffective = !!preference && state.status !== 'unavailable';
   const stockVisible = tab.kind === 'replay' || (tab.kind === 'serial' && !pluginEffective);
@@ -85,10 +88,12 @@ const PluginViewSurface: React.FC<Props> = ({ tab, hidden }) => {
   // A structural rejection (changed install, missing grant/consent/view, wrong
   // port binding) cannot be fixed by retrying; offer the page that can fix it.
   const failureActions = rejected ? <>
-    <button type="button" className="btn btn-sm" onClick={openPluginSettings} title={t('pluginViews.failureHint')}>
-      <Settings size={12} /> {t('pluginViews.openSettings')}
-    </button>
-    {retriable && <button type="button" className="btn btn-sm" onClick={() => retryPluginView(tab.id)}>{t('pluginViews.retry')}</button>}
+    {!isRemoteProjected && (
+      <button type="button" className="btn btn-sm" onClick={openPluginSettings} title={t('pluginViews.failureHint')}>
+        <Settings size={12} /> {t('pluginViews.openSettings')}
+      </button>
+    )}
+    {(retriable || isRemoteProjected) && <button type="button" className="btn btn-sm" onClick={() => retryPluginView(tab.id)}>{t('pluginViews.retry')}</button>}
     {serialRejectedFallback && (
       <button type="button" className="btn btn-sm" onClick={() => choose(null)}>
         {t('pluginViews.switchToTerminal')}
@@ -137,12 +142,14 @@ const PluginViewSurface: React.FC<Props> = ({ tab, hidden }) => {
       {tab.kind === 'plugin' && rejected && <div className="plugin-view-placeholder">
         <strong>{t('pluginViews.unavailable')}</strong>
         <p>{reasonKey ? t(reasonKey) : state.error}</p>
-        <p className="plugin-view-failure-hint">{t('pluginViews.failureHint')}</p>
+        {!isRemoteProjected && <p className="plugin-view-failure-hint">{t('pluginViews.failureHint')}</p>}
         <div className="plugin-view-failure-actions">
-          <button className="btn" onClick={openPluginSettings}>
-            <Settings size={14} /> {t('pluginViews.openSettings')}
-          </button>
-          {retriable && <button className="btn" onClick={() => retryPluginView(tab.id)}>{t('pluginViews.retry')}</button>}
+          {!isRemoteProjected && (
+            <button className="btn" onClick={openPluginSettings}>
+              <Settings size={14} /> {t('pluginViews.openSettings')}
+            </button>
+          )}
+          {(retriable || isRemoteProjected) && <button className="btn" onClick={() => retryPluginView(tab.id)}>{t('pluginViews.retry')}</button>}
         </div>
       </div>}
       {pluginEffective && state.status === 'loading' && <div className="plugin-view-placeholder">{t('pluginViews.loading')}</div>}

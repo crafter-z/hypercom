@@ -5,6 +5,7 @@
  * 见 `./tauri.ts` 文件头的参数约定第 3 条。
  */
 import { listen } from '@tauri-apps/api/event';
+import type { ResolvedArtifactDto } from './control';
 
 /** 串口数据事件 payload */
 export interface SerialDataEvent {
@@ -80,6 +81,46 @@ export interface SerialExternalTxEvent {
   source?: string;
 }
 
+/** Control Bridge → 主窗：插件工具调用事件 payload */
+export interface ControlPluginInvokeEvent {
+  requestId: string;
+  pluginId: string;
+  installGeneration: string;
+  tool: string;
+  args: unknown;
+  artifacts: ResolvedArtifactDto[];
+  mode: 'sync' | 'job';
+  jobId: string | null;
+}
+
+/** Control Bridge → 主窗：取消插件异步任务事件 payload */
+export interface ControlPluginJobCancelEvent {
+  jobId: string;
+}
+
+/** Control Bridge → 主窗：远端工作台请求打开投影视图代理 */
+export interface ControlRemoteViewOpenEvent {
+  remoteInstanceId: string;
+  documentId: string;
+  pluginId: string;
+  installGeneration: string;
+  viewId: string;
+  boundPortId: string | null;
+  params: unknown;
+}
+
+/** Control Bridge → 主窗：远端工作台发送投影视图输入 */
+export interface ControlRemoteViewInputEvent {
+  remoteInstanceId: string;
+  kind: string;
+  payload: unknown;
+}
+
+/** Control Bridge → 主窗：远端工作台关闭投影视图代理 */
+export interface ControlRemoteViewCloseEvent {
+  remoteInstanceId: string;
+}
+
 export const eventService = {
   onSerialData: (callback: (event: SerialDataEvent) => void) => {
     return listen<SerialDataEvent>('serial:data', (event) => {
@@ -128,4 +169,19 @@ export const eventService = {
       callback(event.payload);
     });
   },
+
+  onControlPluginInvoke: (callback: (event: ControlPluginInvokeEvent) => void) =>
+    listen<ControlPluginInvokeEvent>('control:plugin-invoke', (event) => callback(event.payload)),
+
+  onControlPluginJobCancel: (callback: (event: ControlPluginJobCancelEvent) => void) =>
+    listen<ControlPluginJobCancelEvent>('control:plugin-job-cancel', (event) => callback(event.payload)),
+
+  onControlRemoteViewOpen: (callback: (event: ControlRemoteViewOpenEvent) => void) =>
+    listen<ControlRemoteViewOpenEvent>('control:remote-view-open', (event) => callback(event.payload)),
+
+  onControlRemoteViewInput: (callback: (event: ControlRemoteViewInputEvent) => void) =>
+    listen<ControlRemoteViewInputEvent>('control:remote-view-input', (event) => callback(event.payload)),
+
+  onControlRemoteViewClose: (callback: (event: ControlRemoteViewCloseEvent) => void) =>
+    listen<ControlRemoteViewCloseEvent>('control:remote-view-close', (event) => callback(event.payload)),
 };

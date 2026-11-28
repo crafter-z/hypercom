@@ -47,6 +47,7 @@ const NO_RPC_DEADLINE_OPS = new Set<string>([
   'fs.writeDirectoryFile', 'fs.createDirectory', 'fs.removeDirectoryEntry', 'fs.renameDirectoryEntry',
   'ui.panel.export', 'fs.write', 'storage.set', 'shell.execute', ...PLUGIN_PROCESS_OPS,
   'http.request', 'http.open', 'http.read', 'http.cancel',
+  'view.pickClientArtifact',
 ]);
 export function hasNoRpcDeadline(op: string): boolean { return NO_RPC_DEADLINE_OPS.has(op); }
 
@@ -62,6 +63,8 @@ export const PLUGIN_BRIDGE_CODE = `
 
   // 宿主 → 插件事件处理器（plugin.on）
   var handlers = Object.create(null);
+  var toolHandlers = Object.create(null);
+  var activeJobControllers = Object.create(null);
   var viewSessions = Object.create(null);
   var viewDocuments = Object.create(null);
   var viewQueues = Object.create(null);
@@ -82,6 +85,81 @@ export const PLUGIN_BRIDGE_CODE = `
         else p.reject(new Error(msg.error || 'plugin api failed'));
       }
     } else if (typeof msg.type === 'string') {
+      if (msg.type === '__control_tool_invoke') {
+        var p = msg.payload || {};
+        var requestId = p.requestId;
+        var tool = p.tool;
+        var args = p.args;
+        var artifacts = Array.isArray(p.artifacts) ? p.artifacts : [];
+        var mode = p.mode === 'job' ? 'job' : 'sync';
+        var jobId = p.jobId;
+        var handler = typeof tool === 'string' ? toolHandlers[tool] : null;
+        if (!handler) {
+          var missingMsg = 'tool handler not registered: ' + String(tool || '');
+          if (mode === 'job' && jobId) {
+            self.postMessage({ type: '__control_job_event', payload: { jobId: jobId, kind: 'error', error: missingMsg } });
+          } else {
+            self.postMessage({ type: '__control_tool_reply', payload: { requestId: requestId, jobId: jobId || null, mode: mode, ok: false, error: missingMsg } });
+          }
+          return;
+        }
+        if (mode === 'sync') {
+          Promise.resolve().then(function () {
+            return handler(args, { artifacts: artifacts, mode: 'sync' });
+          }).then(function (result) {
+            self.postMessage({ type: '__control_tool_reply', payload: { requestId: requestId, mode: 'sync', ok: true, result: result === undefined ? null : result } });
+          }, function (error) {
+            self.postMessage({ type: '__control_tool_reply', payload: { requestId: requestId, mode: 'sync', ok: false, error: String(error && error.message || error || 'plugin tool failed') } });
+          });
+          return;
+        }
+        var controller = typeof AbortController !== 'undefined'
+          ? new AbortController()
+          : { signal: { aborted: false, addEventListener: function () {}, removeEventListener: function () {} }, abort: function () { this.signal.aborted = true; } };
+        if (jobId) activeJobControllers[jobId] = controller;
+        var ctx = {
+          jobId: jobId,
+          signal: controller.signal,
+          artifacts: artifacts,
+          mode: 'job',
+          emitProgress: function (progress, message, data) {
+            var ev = { jobId: jobId, kind: 'progress' };
+            if (typeof progress === 'number') ev.progress = progress;
+            if (message !== undefined) ev.message = String(message);
+            if (data !== undefined) ev.data = data;
+            self.postMessage({ type: '__control_job_event', payload: ev });
+          },
+          emitLog: function (message, stream) {
+            var ev = { jobId: jobId, kind: 'log', message: String(message) };
+            if (stream !== undefined) ev.stream = String(stream);
+            self.postMessage({ type: '__control_job_event', payload: ev });
+          }
+        };
+        Promise.resolve().then(function () {
+          return handler(args, ctx);
+        }).then(function (result) {
+          if (jobId) delete activeJobControllers[jobId];
+          if (controller.signal.aborted) {
+            self.postMessage({ type: '__control_job_event', payload: { jobId: jobId, kind: 'cancelled', message: 'cancelled' } });
+          } else {
+            self.postMessage({ type: '__control_job_event', payload: { jobId: jobId, kind: 'done', result: result === undefined ? null : result } });
+          }
+        }, function (error) {
+          if (jobId) delete activeJobControllers[jobId];
+          if (controller.signal.aborted) {
+            self.postMessage({ type: '__control_job_event', payload: { jobId: jobId, kind: 'cancelled', message: 'cancelled' } });
+          } else {
+            self.postMessage({ type: '__control_job_event', payload: { jobId: jobId, kind: 'error', error: String(error && error.message || error || 'plugin job failed') } });
+          }
+        });
+        return;
+      }
+      if (msg.type === '__control_job_cancel') {
+        var cancelId = msg.payload && msg.payload.jobId;
+        var activeCtrl = typeof cancelId === 'string' ? activeJobControllers[cancelId] : null;
+        if (activeCtrl) activeCtrl.abort();
+        return;
+      }
       if (msg.type.indexOf('view.') === 0) {
         var instanceId = msg.type === 'view.open' ? msg.payload.context.viewInstanceId : msg.payload.instanceId;
         if (msg.type === 'view.document') {
@@ -467,6 +545,9 @@ export const PLUGIN_BRIDGE_CODE = `
             return Promise.reject(new TypeError('binary bytes required'));
           }
           return api['view.sendBinary']({ instanceId: id, type: type, bytes: bytes, documentId: session.documentId }).then(function () {});
+        },
+        pickClientArtifact: function (options) {
+          return session.retired ? Promise.reject(new Error('view session retired')) : api['view.pickClientArtifact']({ instanceId: id, options: options || {} });
         }
       };
       session.view = Object.freeze(view);
@@ -564,8 +645,18 @@ ${PLUGIN_PROCESS_FACADE_CODE}
     heartbeat: function (options) { return api['serial.loan.heartbeat'](options); },
     release: function (options) { return api['serial.loan.release'](options); }
   });
+  var tools = Object.freeze({
+    register: function (name, handler) {
+      if (typeof name !== 'string' || !name) throw new TypeError('tool name required');
+      if (typeof handler !== 'function') throw new TypeError('tool handler required');
+      toolHandlers[name] = handler;
+      return function () {
+        if (toolHandlers[name] === handler) delete toolHandlers[name];
+      };
+    }
+  });
   self.plugin = {
-    api: api, http: http, on: on, rx: rx, views: views, tabs: tabs,
+    api: api, http: http, on: on, rx: rx, views: views, tabs: tabs, tools: tools,
     fs: pluginFileSdk, serial: Object.freeze(Object.assign({}, serialTasks, { loan: serialLoan })),
     shell: Object.freeze({ start: startPluginProcess, execute: api['shell.execute'] }),
     // 宿主能力描述（可选 API 探测）；旧宿主没有该 op，调用会 reject。

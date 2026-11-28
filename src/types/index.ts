@@ -130,6 +130,9 @@ export interface PluginTabItem extends WorkspaceTabItem {
   boundPortId: string | null;
   instanceKey: string;
   restoreOnStartup: boolean;
+  remoteProfileId?: string;
+  remoteHostLabel?: string;
+  remotePluginName?: string;
 }
 
 export interface ReplayTabItem extends WorkspaceTabItem { kind: 'replay'; sessionId: string; trackId: string }
@@ -520,6 +523,17 @@ export interface TriggerRule {
 
 // ==================== 插件相关（issue #17）====================
 
+/** 插件声明的 Control/MCP 工具（与后端 PluginToolDecl 对齐）。 */
+export interface PluginToolDecl {
+  name: string;
+  description: string;
+  access?: 'observe' | 'write' | 'control';
+  mode?: 'sync' | 'job';
+  portScoped?: boolean;
+  acceptsArtifacts?: boolean;
+  inputSchema?: Record<string, unknown>;
+}
+
 /** 插件 manifest 的 wire 视图（与后端 PluginManifestView 对齐）。 */
 export interface PluginManifestView {
   id: string;
@@ -531,6 +545,8 @@ export interface PluginManifestView {
   entry?: string;
   permissions: string[];
   requires?: string[];
+  hostKind?: 'workbench' | 'host' | 'both';
+  tools?: PluginToolDecl[];
   http?: { urlWhitelist: string[] } | null;
   /** Reserved compatibility metadata; shell.execute is controlled only by its grant. */
   shell?: { executableWhitelist: string[] } | null;

@@ -11,7 +11,7 @@ function installation(permissions: string[], grantedPermissions: string[] = []):
     id: 'demo', dir: 'plugins/demo', installGeneration: 'install-a', enabled: false, installedAt: null,
     manifest: { id: 'demo', name: 'Demo', version: '1.0.0', apiVersion: '1.0', entry: 'main.js', description: '', permissions },
     manifestError: null,
-    knownPermissions: ['terminal:read', 'rx:bytes', 'serial:send', 'serial:control', 'fs:open-dir', 'fs:export-dir', 'fs:write-dir', 'http:request', 'shell:execute'],
+    knownPermissions: ['terminal:read', 'rx:bytes', 'serial:send', 'serial:control', 'fs:open-dir', 'fs:export-dir', 'fs:write-dir', 'http:request', 'shell:execute', 'control:expose'],
     declaredPermissions: permissions,
     grantedPermissions,
   };
@@ -57,6 +57,15 @@ describe('plugin permission review', () => {
     expect(reviewStillApplies(reviewed, { ...reviewed, installGeneration: 'install-b' })).toBe(false);
     expect(reviewStillApplies(reviewed, { ...reviewed, grantedPermissions: [] })).toBe(false);
     expect(reviewStillApplies(reviewed, { ...reviewed, manifest: { ...reviewed.manifest!, serial: { portWhitelist: [] } } })).toBe(false);
+  });
+
+  it('groups control:expose under external and includes it in initial install selection', () => {
+    const plugin = installation(['control:expose', 'terminal:read', 'shell:execute']);
+    expect(groupedPermissions(reviewablePermissions(plugin))).toEqual([
+      { group: 'observe', permissions: ['terminal:read'] },
+      { group: 'external', permissions: ['control:expose', 'shell:execute'] },
+    ]);
+    expect(initialReviewSelection(plugin, true)).toEqual(['control:expose', 'terminal:read']);
   });
 
   it('keeps review translations in matching order with matching placeholders', () => {

@@ -156,11 +156,41 @@ describe('plugin view failure surface', () => {
       expect([code, buttonLabels().includes(label('pluginViews.retry'))]).toEqual([code, false]);
       expect([code, buttonLabels().includes(label('pluginViews.openSettings'))]).toEqual([code, true]);
     }
-    const transient: PluginViewFailureCode[] = ['worker-unavailable', 'worker-stopped', 'init-timeout', 'capacity', 'runtime'];
-    for (const code of transient) {
-      viewState = stateWith(code);
+    for (const transientCode of ['worker-unavailable', 'worker-stopped', 'init-timeout', 'capacity', 'runtime'] as PluginViewFailureCode[]) {
+      viewState = stateWith(transientCode);
       await render();
-      expect([code, buttonLabels().includes(label('pluginViews.retry'))]).toEqual([code, true]);
+      expect([transientCode, buttonLabels().includes(label('pluginViews.retry'))]).toEqual([transientCode, true]);
     }
+  });
+
+  it('displays remote host and plugin name and hides local plugin settings for projected remote tabs', async () => {
+    const remoteTab: TabItem = {
+      kind: 'plugin',
+      id: 'tab-remote-1',
+      title: 'Dashboard',
+      splitPaneId: 'main',
+      isPinned: false,
+      pluginId: 'com.example.views',
+      installGeneration: 'gen-1',
+      viewId: 'table',
+      boundPortId: null,
+      instanceKey: 'remote:lab-1',
+      restoreOnStartup: false,
+      remoteProfileId: 'lab-1',
+      remoteHostLabel: 'Lab Bench',
+      remotePluginName: 'Remote Scope',
+    };
+    viewState = stateWith('runtime');
+    await act(async () => {
+      root.render(createElement(PluginViewSurface, { tab: remoteTab, hidden: false }));
+    });
+    expect(container.querySelector('.plugin-view-source-name')?.textContent).toBe('[Lab Bench] Remote Scope');
+    expect(buttonLabels()).not.toContain(label('pluginViews.openSettings'));
+    const retryButtons = [...container.querySelectorAll('button')].filter(
+      button => button.textContent?.includes(label('pluginViews.retry')),
+    );
+    expect(retryButtons.length).toBeGreaterThan(0);
+    await act(async () => { retryButtons[0].click(); });
+    expect(retryPluginView).toHaveBeenCalledWith('tab-remote-1');
   });
 });

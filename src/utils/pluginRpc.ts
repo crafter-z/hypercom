@@ -114,6 +114,8 @@ export const OP_PERMISSIONS: PermissionMap = {
   'view.publish': 'ui:view',
   'view.sendSerial': 'ui:view',
   'view.sendBinary': 'ui:view',
+  'view.pickClientArtifact': 'ui:view',
+  'control.jobEvent': null,
   'tabs.open': 'ui:tabs',
   'tabs.activate': 'ui:tabs',
   'tabs.close': 'ui:tabs',

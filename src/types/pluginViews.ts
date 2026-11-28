@@ -151,6 +151,18 @@ export interface PluginTabOpenOptions {
   actionToken?: string;
 }
 
+export interface RemotePluginViewOpenOptions {
+  profileId: string;
+  hostLabel: string;
+  pluginId: string;
+  pluginName: string;
+  installGeneration: string;
+  viewId: string;
+  label: string;
+  boundPortId?: string | null;
+  params?: unknown;
+}
+
 /** Why a plugin view could not be shown. Kept separate from the message so the
  *  UI can localize a stable reason and know whether retrying can ever help. */
 export type PluginViewFailureCode =

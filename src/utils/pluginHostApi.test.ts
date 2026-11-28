@@ -868,7 +868,16 @@ describe('host API plugin notifications', () => {
 describe('host capability descriptor', () => {
   it('advertises a stable feature set instead of a drift-prone host version string', async () => {
     const info = await executeHostApi('api.plugin', 'host.info', null);
-    expect(info).toEqual({ apiVersion: 1, features: { serialLoan: true, portLease: true } });
+    expect(info).toEqual({
+      apiVersion: 1,
+      features: {
+        serialLoan: true,
+        portLease: true,
+        pluginTools: true,
+        remotePorts: true,
+        artifacts: true,
+      },
+    });
     // Dispatched value is the frozen build-time descriptor: plugins can only
     // read capabilities, never patch the host's answer.
     expect(Object.isFrozen(info)).toBe(true);
@@ -876,6 +885,15 @@ describe('host capability descriptor', () => {
 
   it('ignores caller-supplied arguments so a plugin cannot rewrite capability answers', async () => {
     const info = await executeHostApi('api.plugin', 'host.info', { features: { serialLoan: false, portLease: false } });
-    expect(info).toEqual({ apiVersion: 1, features: { serialLoan: true, portLease: true } });
+    expect(info).toEqual({
+      apiVersion: 1,
+      features: {
+        serialLoan: true,
+        portLease: true,
+        pluginTools: true,
+        remotePorts: true,
+        artifacts: true,
+      },
+    });
   });
 });

@@ -50,6 +50,9 @@ export interface PluginSerialPort {
   mode: string;
   baudRate?: number;
   connectionGeneration: number;
+  isRemote?: boolean;
+  remoteRole?: string;
+  remoteAllowLoan?: boolean;
 }
 export interface PluginSerialOpenRequest {
   portId: string;

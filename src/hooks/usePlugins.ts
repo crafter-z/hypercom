@@ -17,6 +17,7 @@ import {
   syncStorePluginConfigs,
 } from '../utils/pluginConfigSnapshot';
 import { reloadPluginViews } from '../utils/pluginViewRuntime';
+import { startPluginControlBridge } from '../utils/pluginControlBridge';
 import {
   effectivePermissions, hasTrustedViews, permissionDelta, reviewablePermissions, reviewStillApplies,
   type PluginPermissionDecision,
@@ -187,9 +188,11 @@ export function usePluginHost(): void {
       pluginHost.syncWithConfig();
     });
     pluginHost.setCallbacks({ onPluginCrashed: () => void refresh() });
+    const stopControlBridge = startPluginControlBridge();
 
     return () => {
       active = false;
+      stopControlBridge();
       unsubscribeReady();
       unsubscribeConfig();
       for (const unsubscribe of rxAttachmentsRef.current.values()) unsubscribe();
