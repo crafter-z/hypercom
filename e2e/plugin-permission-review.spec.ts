@@ -100,7 +100,7 @@ async function openPluginSettings(page: Page, trustedWeb = false) {
   await page.addInitScript({ content: `${TAURI_MOCK}\n(${installReviewIpc.toString()})(${JSON.stringify(seed)});` });
   await page.goto('/');
   await expect(page.locator('html')).toHaveAttribute('lang', language);
-  await page.locator(`.titlebar-right button[title="${trustedWeb ? '设置' : 'Settings'}"]`).click();
+  await page.locator(`.titlebar-right button[aria-label="${trustedWeb ? '设置' : 'Settings'}"]`).click();
   await page.locator('.modal-nav-item').filter({ hasText: trustedWeb ? /^插件$/ : /^Plugins$/ }).click();
   await page.getByRole('button', { name: trustedWeb ? '安装 ZIP…' : 'Install ZIP…', exact: true }).click();
 }

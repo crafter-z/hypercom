@@ -263,7 +263,7 @@ test('protocol preview, contrast samples and expanded editing preserve drafts', 
   await page.locator('.editor-accordion-header button[aria-expanded="false"]').first().click();
   await expect(page.locator('.rule-preview__sample--light').first()).toHaveCSS('background-color', 'rgb(255, 255, 255)');
   await expect(page.locator('.rule-preview__sample--dark').first()).toHaveCSS('background-color', 'rgb(25, 26, 30)');
-  await expect(page.locator('.rule-preview__contrast--warning').first()).toBeVisible();
+  await expect(page.locator('.highlight-rule-editor__contrast--other').first()).toBeVisible();
   await openSettings(page, 'protocol');
   await expect(page.locator('#protocol-header-ui-protocol')).toHaveValue('AA 66');
 });

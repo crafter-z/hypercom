@@ -71,7 +71,7 @@ test.describe('HyperCom smoke tests', () => {
 
   test('GeneralSettings shows per-port max display lines input (issue #6-2, #16 改版)', async ({ page }) => {
     // 打开设置弹窗（TitleBar 右侧设置按钮）
-    await page.locator('.titlebar-right button[title="设置"]').click();
+    await page.locator('.titlebar-right button[aria-label="设置"]').click();
     await expect(page.locator('.modal-overlay')).toBeVisible();
     // issue #16 改版：双内存预算 → 单一「最大显示行数」
     await expect(page.locator('.config-page').getByText('最大显示行数:')).toBeVisible();
@@ -341,7 +341,7 @@ test.describe('HyperCom smoke tests', () => {
     expect(await page.evaluate(() => JSON.parse(localStorage.getItem('smoke.update.config')!).updateCheckMode)).toBe('none');
     // Reload from the mocked backend to assert durability, not just a local radio.
     await page.reload();
-    await page.locator('.titlebar-right button[title="设置"]').click();
+    await page.locator('.titlebar-right button[aria-label="设置"]').click();
     await expect(page.locator('.config-page').getByText('不自动检查更新')).toBeVisible();
     const radio = page.locator('input[name="updateCheckMode"][value="none"]');
     await expect(radio).toBeChecked();
@@ -1047,7 +1047,7 @@ test.describe('HyperCom smoke tests', () => {
   });
 
   test('default line ending settings use backend domain values', async ({ page }) => {
-    await page.locator('.titlebar-right button[title="设置"]').click();
+    await page.locator('.titlebar-right button[aria-label="设置"]').click();
     await page.locator('.modal-nav-item', { hasText: '显示与交互' }).click();
     const ending = page.locator('.config-page select').first();
     await expect(ending).toHaveValue('\\r\\n');

@@ -386,7 +386,7 @@ test.describe('插件系统（issue #17）', () => {
     await dispatchSerialData(page, 'COM1', 'PING before-reload\n');
     await expect(page.locator('.terminal-line .terminal-content').filter({ hasText: 'PONG<PING before-reload>#1' })).toBeVisible();
 
-    await page.locator('.titlebar-right button[title="设置"]').click();
+    await page.locator('.titlebar-right button[aria-label="设置"]').click();
     await page.locator('.modal-nav-item').filter({ hasText: '插件' }).click();
     const reload = page.getByRole('button', { name: '重载已安装代码', exact: true });
     await expect(reload).toBeEnabled();
@@ -454,7 +454,7 @@ test.describe('插件系统（issue #17）', () => {
           const wrapper = element.querySelector('.plugin-view-picker')!.getBoundingClientRect();
           const button = element.querySelector('.plugin-view-picker-trigger')!.getBoundingClientRect();
           const link = element.querySelector('.timeline-entry')!.getBoundingClientRect();
-          const gap = parseFloat(getComputedStyle(element).columnGap);
+          const gap = parseFloat(getComputedStyle(element.querySelector('.terminal-filter-main') ?? element).columnGap);
           return Math.abs(wrapper.width - button.width) < 1 && Math.abs(link.left - button.right - gap) < 1
             && Math.abs(link.top - button.top) <= 2 && button.width <= 120;
         })).toBe(true);

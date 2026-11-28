@@ -116,7 +116,7 @@ async function installBackend(page: Page) {
 }
 
 async function openCommands(page: Page) {
-  await page.locator('.titlebar-right button[title="设置"]').click();
+  await page.locator('.titlebar-right button[aria-label="设置"]').click();
   await page.locator('.modal-nav-item').filter({ hasText: '发送命令规则' }).click();
   const toggle = page.getByRole('button', { name: 'Fixture commands', exact: true });
   if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
@@ -199,7 +199,7 @@ test('compact command editor fits six editable commands and stays within narrow 
     localStorage.setItem(key, JSON.stringify(config));
   }, BACKEND_KEY);
   await page.reload();
-  await page.locator('.titlebar-right button[title="设置"]').click();
+  await page.locator('.titlebar-right button[aria-label="设置"]').click();
   await page.locator('.modal-nav-item').filter({ hasText: '发送命令规则' }).click();
   const toggle = page.getByRole('button', { name: '设备调试命令', exact: true });
   if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
@@ -395,7 +395,7 @@ test('keyboard sorting changes persisted execution order and reload restores it'
 });
 
 test('reminder and highlight drafts do not apply or save until explicit save; hidden pages are included', async ({ page }) => {
-  await page.locator('.titlebar-right button[title="设置"]').click();
+  await page.locator('.titlebar-right button[aria-label="设置"]').click();
   await page.locator('.modal-nav-item').filter({ hasText: '条件触发' }).click();
   await page.getByRole('textbox', { name: '名称', exact: true }).fill('Edited trigger');
   await page.locator('.modal-nav-item').filter({ hasText: '语法高亮规则' }).click();
@@ -480,7 +480,7 @@ test('editing after an individual save is preserved by a later full settings sav
   await expect(page.locator('.editor-status')).toHaveCount(0);
   await page.locator('.modal-content-header').getByRole('button', { name: '关闭', exact: true }).click();
   await expect(page.locator('.modal-dialog')).toHaveCount(0);
-  await page.locator('.titlebar-right button[title="设置"]').click();
+  await page.locator('.titlebar-right button[aria-label="设置"]').click();
   await expect(name).toHaveValue('Saved once');
   await name.fill('Latest edit');
   await page.locator('.modal-content-footer .btn-primary').click();
@@ -490,7 +490,7 @@ test('editing after an individual save is preserved by a later full settings sav
   await page.locator('.modal-content-header').getByRole('button', { name: '关闭', exact: true }).click();
   await expect(page.locator('.modal-dialog')).toHaveCount(0);
   await page.reload();
-  await page.locator('.titlebar-right button[title="设置"]').click();
+  await page.locator('.titlebar-right button[aria-label="设置"]').click();
   await page.locator('.modal-nav-item').filter({ hasText: '发送命令规则' }).click();
   await expect(name).toHaveValue('Latest edit');
   expect((await persisted(page)).sendCommandSets[0].name).toBe('Latest edit');

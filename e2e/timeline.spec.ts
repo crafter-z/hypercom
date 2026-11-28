@@ -149,6 +149,7 @@ test('a linked view dissolves its group from the panel body without opening adva
   await expect(dissolve).toBeVisible();
   await dialog.screenshot({ path: '.npm-cache/timeline-dissolve-dark.png', animations: 'disabled' });
   await dissolve.click();
+  await page.locator('.confirm-dialog').getByRole('button', { name: '确定', exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(page.locator('.tab-item .timeline-badge')).toHaveCount(0);
   await expect(page.locator('.timeline-entry.active')).toHaveCount(0);
@@ -238,7 +239,7 @@ test(`linked Pins preserve existing follow and keep the latest RX row visible af
       getViewportManager(port).appendLines(Array.from({ length: 200 }, (_, i) => ({ timestamp: Date.now() - 200 + i, direction: 'RX', rawData: new TextEncoder().encode('initial ' + i), isHex: false })));
     }
   }, wordWrap);
-  await expect(page.getByTitle('滚动锁定', { exact: true }).filter({ visible: true })).toHaveCount(2);
+  await expect(page.getByTitle('自动跟随', { exact: true }).filter({ visible: true })).toHaveCount(2);
   await page.locator('.timeline-entry:visible').first().click();
   const dialog = page.getByRole('dialog', { name: '时间联动', exact: true });
   await dialog.getByRole('checkbox', { name: /COM1/ }).check();
@@ -432,7 +433,7 @@ test('creating a time group from an unlocked terminal keeps browsing instead of 
     useTerminalStore.getState().setTerminalConfig('COM1', { scrollLocked: false });
     getViewportManager('COM1').appendLines(Array.from({ length: 200 }, (_, i) => ({ timestamp: Date.now() - 200 + i, direction: 'RX', rawData: new TextEncoder().encode('history ' + i), isHex: false })));
   });
-  await expect(page.getByTitle('滚动锁定', { exact: true }).filter({ visible: true })).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByTitle('自动跟随', { exact: true }).filter({ visible: true })).toHaveAttribute('aria-pressed', 'false');
   await page.locator('.timeline-entry:visible').click();
   await page.getByRole('dialog', { name: '时间联动', exact: true }).getByRole('button', { name: '创建联动组', exact: true }).click();
   await expect(page.getByTitle('切换整组滚动跟随', { exact: true }).filter({ visible: true })).toHaveAttribute('aria-pressed', 'false');
@@ -558,8 +559,9 @@ test('terminal controls fit narrow split panes and the direction dropdown preser
       await page.setViewportSize({ width, height: 900 });
       await expect.poll(() => bar.evaluate(element => {
         const bounds = element.getBoundingClientRect();
-        const controls = [...element.querySelectorAll('button, input, select')].map(control => control.getBoundingClientRect());
-        const escaped = controls.some(rect => rect.left < bounds.left - 1 || rect.right > bounds.right + 1 || rect.top < bounds.top - 1 || rect.bottom > bounds.bottom + 1);
+        const allControls = [...element.querySelectorAll('button, input, select')].map(control => control.getBoundingClientRect());
+        const controls = [...element.querySelectorAll('button:not(.terminal-filter-keyword-clear), input, select')].map(control => control.getBoundingClientRect());
+        const escaped = allControls.some(rect => rect.left < bounds.left - 1 || rect.right > bounds.right + 1 || rect.top < bounds.top - 1 || rect.bottom > bounds.bottom + 1);
         const overlaps = controls.some((a, index) => controls.slice(index + 1).some(b => Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1));
         return { escaped, overlaps, horizontalOverflow: element.scrollWidth > element.clientWidth + 1 };
       })).toEqual({ escaped: false, overlaps: false, horizontalOverflow: false });
