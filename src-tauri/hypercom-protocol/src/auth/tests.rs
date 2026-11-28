@@ -1,6 +1,6 @@
 use super::{
-    digest, load_profile, save_profile, Access, Authority, ProfileStore, RemoteInvite,
-    RemotePermissions, RemoteRole,
+    digest, load_profile, save_profile, Access, Authority, Credential, Peer, ProfileStore,
+    RemoteInvite, RemotePermissions, RemoteRole,
 };
 use crate::protocol::HostError;
 use std::{
@@ -318,4 +318,122 @@ fn remote_permissions_defaults_allow_loan_when_omitted() {
     let parsed: RemotePermissions = serde_json::from_str(raw).unwrap();
     assert!(!parsed.allow_loan);
     assert!(!parsed.automation);
+    assert!(!parsed.device_plugins);
+}
+
+#[test]
+fn device_plugins_allowed_on_all_roles_and_invite_roundtrips() {
+    let scratch = Scratch::new();
+    let auth = scratch.authority();
+
+    for role in [RemoteRole::Observe, RemoteRole::Write, RemoteRole::Control] {
+        let mut perms = permission(role, false);
+        perms.device_plugins = true;
+
+        let invite = auth
+            .invite(format!("plugins-{role}"), perms, None)
+            .unwrap();
+        assert!(invite.device_plugins);
+
+        let invite_json = serde_json::to_value(&invite).unwrap();
+        assert_eq!(invite_json["devicePlugins"], true);
+        let parsed_invite = RemoteInvite::parse(&serde_json::to_string(&invite).unwrap()).unwrap();
+        assert!(parsed_invite.device_plugins);
+        assert_eq!(parsed_invite.role, Some(role));
+
+        let profile = auth.pair(&invite.code).unwrap();
+        assert!(profile.permissions.device_plugins);
+
+        let peer = auth
+            .authenticate(&profile.client_id, &profile.token)
+            .unwrap();
+        assert!(peer.check(Access::DevicePlugins, Some("COM7")).is_ok());
+        assert_eq!(
+            err_code(peer.check(Access::DevicePlugins, Some("COM8"))),
+            "forbidden"
+        );
+    }
+
+    // Legacy invite JSON without devicePlugins defaults device_plugins to false.
+    let legacy_json = r#"{
+        "endpoint": "127.0.0.1:24680",
+        "serverId": "srv-1",
+        "certificateSha256": "abc",
+        "code": "secret",
+        "ports": ["COM7"],
+        "role": "observe",
+        "allowLoan": false
+    }"#;
+    let legacy_invite = RemoteInvite::parse(legacy_json).unwrap();
+    assert!(!legacy_invite.device_plugins);
+}
+
+#[test]
+fn remote_role_allows_tool_access_matches_hierarchy() {
+    assert!(RemoteRole::Observe.allows_tool_access("observe"));
+    assert!(!RemoteRole::Observe.allows_tool_access("write"));
+    assert!(!RemoteRole::Observe.allows_tool_access("control"));
+    assert!(!RemoteRole::Observe.allows_tool_access("unknown"));
+    assert!(!RemoteRole::Observe.allows_tool_access(""));
+
+    assert!(RemoteRole::Write.allows_tool_access("observe"));
+    assert!(RemoteRole::Write.allows_tool_access("write"));
+    assert!(!RemoteRole::Write.allows_tool_access("control"));
+    assert!(!RemoteRole::Write.allows_tool_access("Observe"));
+
+    assert!(RemoteRole::Control.allows_tool_access("observe"));
+    assert!(RemoteRole::Control.allows_tool_access("write"));
+    assert!(RemoteRole::Control.allows_tool_access("control"));
+    assert!(!RemoteRole::Control.allows_tool_access("admin"));
+}
+
+#[test]
+fn peer_check_and_invite_serde_for_device_plugins_across_all_roles() {
+    for role in [RemoteRole::Observe, RemoteRole::Write, RemoteRole::Control] {
+        let mut enabled = permission(role, false);
+        enabled.device_plugins = true;
+        let peer = Peer::new(Credential {
+            client_id: "00000000-0000-0000-0000-000000000001".into(),
+            label: format!("peer-{role}"),
+            token_hash: digest(b"token"),
+            permissions: enabled,
+            revoked: false,
+        });
+        assert!(peer.check(Access::DevicePlugins, Some("COM7")).is_ok());
+        assert!(peer.check(Access::DevicePlugins, None).is_ok());
+        assert_eq!(
+            err_code(peer.check(Access::DevicePlugins, Some("COM8"))),
+            "forbidden"
+        );
+
+        let disabled_peer = Peer::new(Credential {
+            client_id: "00000000-0000-0000-0000-000000000002".into(),
+            label: format!("peer-no-plugin-{role}"),
+            token_hash: digest(b"token"),
+            permissions: permission(role, false),
+            revoked: false,
+        });
+        assert_eq!(
+            err_code(disabled_peer.check(Access::DevicePlugins, Some("COM7"))),
+            "forbidden"
+        );
+    }
+
+    let invite = RemoteInvite {
+        endpoint: "127.0.0.1:24680".into(),
+        server_id: "srv-1".into(),
+        certificate_sha256: "abc".into(),
+        code: "secret".into(),
+        expires_at: Some(1_700_000_000_000),
+        label: Some("bench".into()),
+        ports: vec!["COM7".into()],
+        role: Some(RemoteRole::Observe),
+        allow_loan: false,
+        device_plugins: true,
+    };
+    let json = serde_json::to_string(&invite).unwrap();
+    assert!(json.contains("\"devicePlugins\":true"));
+    let roundtrip = RemoteInvite::parse(&json).unwrap();
+    assert!(roundtrip.device_plugins);
+    assert_eq!(roundtrip.role, Some(RemoteRole::Observe));
 }

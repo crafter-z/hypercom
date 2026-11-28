@@ -14,6 +14,7 @@ pub const MAX_WRITE_BYTES: usize = 64 * 1024;
 pub const MAX_EXPECT_BYTES: usize = 4096;
 pub const MAX_EXPECT_MS: u64 = 60_000;
 pub const MAX_POLL_MS: u64 = 1000;
+pub const MAX_ARTIFACT_CHUNK_BYTES: usize = 512 * 1024;
 
 const REMOTE_PREFIX: &str = "remote::";
 
@@ -264,6 +265,134 @@ pub struct RequestOutcomeDto {
     pub seq: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginToolDescriptorDto {
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_label: Option<String>,
+    pub plugin_id: String,
+    pub plugin_name: String,
+    pub install_generation: String,
+    pub tool: String,
+    pub description: String,
+    pub access: String,
+    pub mode: String,
+    pub port_scoped: bool,
+    pub accepts_artifacts: bool,
+    pub input_schema: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginJobEventDto {
+    pub seq: u64,
+    pub timestamp_ms: i64,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginJobStatusDto {
+    pub job_id: String,
+    pub host: String,
+    pub plugin_id: String,
+    pub tool: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<HostError>,
+    pub latest_seq: u64,
+    pub next_seq: u64,
+    #[serde(default)]
+    pub events: Vec<PluginJobEventDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginToolInvokeResultDto {
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<PluginJobStatusDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactInfoDto {
+    pub artifact_id: String,
+    pub name: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePluginViewEntryDto {
+    pub plugin_id: String,
+    pub plugin_name: String,
+    pub install_generation: String,
+    pub view_id: String,
+    pub label: String,
+    pub mode: String,
+    pub placements: Vec<String>,
+    pub port_binding: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteViewAssetDto {
+    pub rel_path: String,
+    pub mime: String,
+    pub data_base64: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteViewSessionDto {
+    pub remote_instance_id: String,
+    pub document_id: String,
+    pub plugin_id: String,
+    pub plugin_name: String,
+    pub install_generation: String,
+    pub view_id: String,
+    pub label: String,
+    pub entry: String,
+    pub styles: Vec<String>,
+    pub assets: Vec<RemoteViewAssetDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteViewEventDto {
+    pub seq: u64,
+    pub kind: String,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteViewEventPageDto {
+    pub remote_instance_id: String,
+    pub latest_seq: u64,
+    pub next_seq: u64,
+    pub closed: bool,
+    pub events: Vec<RemoteViewEventDto>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReplyEnvelope {
@@ -429,6 +558,8 @@ pub enum ControlCommand {
         role: String,
         #[serde(default)]
         allow_loan: bool,
+        #[serde(default)]
+        device_plugins: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ttl_secs: Option<u64>,
     },
@@ -444,6 +575,88 @@ pub enum ControlCommand {
         server_id: String,
         client_id: String,
         token: String,
+    },
+    ListPluginTools,
+    InvokePluginTool {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        plugin_id: String,
+        tool: String,
+        #[serde(default)]
+        args: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifacts: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+    },
+    PollPluginJob {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        job_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_seq: Option<u64>,
+        #[serde(default)]
+        wait_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    CancelPluginJob {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        job_id: String,
+    },
+    ArtifactBegin {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_bytes: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttl_ms: Option<u64>,
+    },
+    ArtifactChunk {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        upload_id: String,
+        offset: u64,
+        data_base64: String,
+    },
+    ArtifactCommit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        upload_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_sha256: Option<String>,
+    },
+    ArtifactAbort {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        upload_id: String,
+    },
+    ListRemotePluginViews,
+    OpenRemotePluginView {
+        plugin_id: String,
+        view_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bound_port_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        params: Option<Value>,
+    },
+    SendRemotePluginViewInput {
+        remote_instance_id: String,
+        kind: String,
+        #[serde(default)]
+        payload: Value,
+    },
+    PollRemotePluginViewEvents {
+        remote_instance_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_seq: Option<u64>,
+        #[serde(default)]
+        wait_ms: u64,
+    },
+    CloseRemotePluginView {
+        remote_instance_id: String,
     },
 }
 
@@ -623,15 +836,33 @@ mod tests {
             ports: vec!["COM3".into()],
             role: "control".into(),
             allow_loan: true,
+            device_plugins: true,
             ttl_secs: Some(300),
         };
         let json = serde_json::to_value(&cmd).unwrap();
         assert_eq!(json["op"], "remote_create_invite");
         assert_eq!(json["allowLoan"], true);
+        assert_eq!(json["devicePlugins"], true);
         assert_eq!(json["ttlSecs"], 300);
         assert_eq!(
             serde_json::from_value::<ControlCommand>(json).unwrap(),
             cmd
+        );
+
+        let legacy_invite_cmd: ControlCommand = serde_json::from_str(
+            r#"{"op":"remote_create_invite","label":"legacy","ports":["COM3"],"role":"observe"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy_invite_cmd,
+            ControlCommand::RemoteCreateInvite {
+                label: "legacy".into(),
+                ports: vec!["COM3".into()],
+                role: "observe".into(),
+                allow_loan: false,
+                device_plugins: false,
+                ttl_secs: None,
+            }
         );
 
         let ok = ReplyEnvelope::ok(serde_json::json!({"ok": true}));
@@ -640,5 +871,251 @@ mod tests {
         let err = ReplyEnvelope::err(HostError::new("forbidden", "no access"));
         let host_err = err.into_result().unwrap_err();
         assert_eq!(host_err.code, "forbidden");
+    }
+
+    #[test]
+    fn plugin_tool_artifact_and_remote_view_commands_serde() {
+        let commands = vec![
+            ControlCommand::ListPluginTools,
+            ControlCommand::InvokePluginTool {
+                target: Some("remote::bench::COM3".into()),
+                plugin_id: "stm32-flasher".into(),
+                tool: "flash".into(),
+                args: serde_json::json!({"verify": true}),
+                artifacts: Some(vec!["art-1".into()]),
+                timeout_ms: Some(30_000),
+            },
+            ControlCommand::InvokePluginTool {
+                target: None,
+                plugin_id: "diag".into(),
+                tool: "info".into(),
+                args: Value::Null,
+                artifacts: None,
+                timeout_ms: None,
+            },
+            ControlCommand::PollPluginJob {
+                target: Some("bench".into()),
+                job_id: "job-1".into(),
+                after_seq: Some(4),
+                wait_ms: 500,
+                limit: Some(100),
+            },
+            ControlCommand::CancelPluginJob {
+                target: None,
+                job_id: "job-1".into(),
+            },
+            ControlCommand::ArtifactBegin {
+                target: Some("bench".into()),
+                name: "firmware.bin".into(),
+                total_bytes: Some(1024 * 1024),
+                ttl_ms: Some(60_000),
+            },
+            ControlCommand::ArtifactChunk {
+                target: Some("bench".into()),
+                upload_id: "up-1".into(),
+                offset: 524_288,
+                data_base64: "AQID".into(),
+            },
+            ControlCommand::ArtifactCommit {
+                target: None,
+                upload_id: "up-1".into(),
+                expected_sha256: Some("deadbeef".into()),
+            },
+            ControlCommand::ArtifactAbort {
+                target: None,
+                upload_id: "up-1".into(),
+            },
+            ControlCommand::ListRemotePluginViews,
+            ControlCommand::OpenRemotePluginView {
+                plugin_id: "scope".into(),
+                view_id: "waveform".into(),
+                bound_port_id: Some("COM7".into()),
+                params: Some(serde_json::json!({"rate": 1000})),
+            },
+            ControlCommand::SendRemotePluginViewInput {
+                remote_instance_id: "inst-1".into(),
+                kind: "state".into(),
+                payload: serde_json::json!({"paused": false}),
+            },
+            ControlCommand::PollRemotePluginViewEvents {
+                remote_instance_id: "inst-1".into(),
+                after_seq: Some(2),
+                wait_ms: 250,
+            },
+            ControlCommand::CloseRemotePluginView {
+                remote_instance_id: "inst-1".into(),
+            },
+        ];
+
+        for cmd in commands {
+            let encoded = FrameEnvelope::encode(&cmd).unwrap();
+            let decoded: ControlCommand = FrameEnvelope::decode(&encoded).unwrap();
+            assert_eq!(decoded, cmd);
+        }
+
+        // Verify defaults when optional fields are omitted
+        let minimal_invoke: ControlCommand = serde_json::from_str(
+            r#"{"op":"invoke_plugin_tool","pluginId":"p","tool":"t"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            minimal_invoke,
+            ControlCommand::InvokePluginTool {
+                target: None,
+                plugin_id: "p".into(),
+                tool: "t".into(),
+                args: Value::Null,
+                artifacts: None,
+                timeout_ms: None,
+            }
+        );
+
+        let minimal_input: ControlCommand = serde_json::from_str(
+            r#"{"op":"send_remote_plugin_view_input","remoteInstanceId":"r1","kind":"state"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            minimal_input,
+            ControlCommand::SendRemotePluginViewInput {
+                remote_instance_id: "r1".into(),
+                kind: "state".into(),
+                payload: Value::Null,
+            }
+        );
+    }
+
+    #[test]
+    fn plugin_tool_artifact_and_remote_view_dtos_serde() {
+        let descriptor = PluginToolDescriptorDto {
+            host: "remote::lab".into(),
+            host_label: Some("Lab Bench".into()),
+            plugin_id: "flasher".into(),
+            plugin_name: "Flasher".into(),
+            install_generation: "gen-1".into(),
+            tool: "program".into(),
+            description: "Program MCU".into(),
+            access: "control".into(),
+            mode: "job".into(),
+            port_scoped: true,
+            accepts_artifacts: true,
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        let descriptor_json = serde_json::to_value(&descriptor).unwrap();
+        assert_eq!(descriptor_json["hostLabel"], "Lab Bench");
+        assert_eq!(descriptor_json["installGeneration"], "gen-1");
+        assert_eq!(descriptor_json["portScoped"], true);
+        assert_eq!(descriptor_json["acceptsArtifacts"], true);
+        assert_eq!(
+            serde_json::from_value::<PluginToolDescriptorDto>(descriptor_json).unwrap(),
+            descriptor
+        );
+
+        let job_event = PluginJobEventDto {
+            seq: 1,
+            timestamp_ms: 1_700_000_000_000,
+            kind: "progress".into(),
+            message: Some("erasing".into()),
+            stream: Some("stdout".into()),
+            progress: Some(0.5),
+            data: Some(serde_json::json!({"sector": 3})),
+        };
+        let job_status = PluginJobStatusDto {
+            job_id: "job-42".into(),
+            host: "local".into(),
+            plugin_id: "flasher".into(),
+            tool: "program".into(),
+            state: "running".into(),
+            result: None,
+            error: Some(HostError::new("warn", "retry")),
+            latest_seq: 1,
+            next_seq: 2,
+            events: vec![job_event],
+        };
+        let invoke_result = PluginToolInvokeResultDto {
+            mode: "job".into(),
+            result: Some(serde_json::json!({"started": true})),
+            job_id: Some("job-42".into()),
+            status: Some(job_status.clone()),
+        };
+        let invoke_json = serde_json::to_value(&invoke_result).unwrap();
+        assert_eq!(
+            serde_json::from_value::<PluginToolInvokeResultDto>(invoke_json).unwrap(),
+            invoke_result
+        );
+
+        let artifact = ArtifactInfoDto {
+            artifact_id: "art-1".into(),
+            name: "app.bin".into(),
+            size_bytes: 2_097_152,
+            sha256: "0123456789abcdef".into(),
+            expires_at_ms: 1_700_000_060_000,
+        };
+        assert_eq!(
+            serde_json::from_value::<ArtifactInfoDto>(serde_json::to_value(&artifact).unwrap())
+                .unwrap(),
+            artifact
+        );
+        assert_eq!(MAX_ARTIFACT_CHUNK_BYTES, 512 * 1024);
+
+        let view_entry = RemotePluginViewEntryDto {
+            plugin_id: "scope".into(),
+            plugin_name: "Scope".into(),
+            install_generation: "gen-2".into(),
+            view_id: "main".into(),
+            label: "Live Scope".into(),
+            mode: "panel".into(),
+            placements: vec!["tab".into(), "sidebar".into()],
+            port_binding: "required".into(),
+        };
+        assert_eq!(
+            serde_json::from_value::<RemotePluginViewEntryDto>(
+                serde_json::to_value(&view_entry).unwrap()
+            )
+            .unwrap(),
+            view_entry
+        );
+
+        let session = RemoteViewSessionDto {
+            remote_instance_id: "inst-9".into(),
+            document_id: "doc-9".into(),
+            plugin_id: "scope".into(),
+            plugin_name: "Scope".into(),
+            install_generation: "gen-2".into(),
+            view_id: "main".into(),
+            label: "Live Scope".into(),
+            entry: "index.js".into(),
+            styles: vec!["style.css".into()],
+            assets: vec![RemoteViewAssetDto {
+                rel_path: "index.js".into(),
+                mime: "application/javascript".into(),
+                data_base64: "Y29uc29sZS5sb2coMSk=".into(),
+            }],
+        };
+        assert_eq!(
+            serde_json::from_value::<RemoteViewSessionDto>(
+                serde_json::to_value(&session).unwrap()
+            )
+            .unwrap(),
+            session
+        );
+
+        let event_page = RemoteViewEventPageDto {
+            remote_instance_id: "inst-9".into(),
+            latest_seq: 10,
+            next_seq: 11,
+            closed: false,
+            events: vec![RemoteViewEventDto {
+                seq: 10,
+                kind: "pick-artifact".into(),
+                payload: serde_json::json!({"accept": [".bin"]}),
+            }],
+        };
+        assert_eq!(
+            serde_json::from_value::<RemoteViewEventPageDto>(
+                serde_json::to_value(&event_page).unwrap()
+            )
+            .unwrap(),
+            event_page
+        );
     }
 }

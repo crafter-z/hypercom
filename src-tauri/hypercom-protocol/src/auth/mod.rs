@@ -42,6 +42,17 @@ pub enum RemoteRole {
     Control,
 }
 
+impl RemoteRole {
+    pub fn allows_tool_access(&self, access: &str) -> bool {
+        match access {
+            "observe" => true,
+            "write" => *self >= Self::Write,
+            "control" => *self >= Self::Control,
+            _ => false,
+        }
+    }
+}
+
 impl fmt::Display for RemoteRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -111,6 +122,8 @@ pub struct RemoteInvite {
     pub role: Option<RemoteRole>,
     #[serde(default)]
     pub allow_loan: bool,
+    #[serde(default)]
+    pub device_plugins: bool,
 }
 
 impl RemoteInvite {
@@ -135,6 +148,7 @@ impl fmt::Debug for RemoteInvite {
             .field("ports", &self.ports)
             .field("role", &self.role)
             .field("allow_loan", &self.allow_loan)
+            .field("device_plugins", &self.device_plugins)
             .field("code", &"[redacted]")
             .finish_non_exhaustive()
     }
@@ -514,7 +528,7 @@ impl Peer {
             Access::Control => grant.role >= RemoteRole::Control,
             Access::Loan => grant.role >= RemoteRole::Control && grant.allow_loan,
             Access::Automation => grant.role >= RemoteRole::Write && grant.automation,
-            Access::DevicePlugins => grant.role >= RemoteRole::Write && grant.device_plugins,
+            Access::DevicePlugins => grant.device_plugins,
             Access::DeviceTools => grant.role >= RemoteRole::Control && grant.device_tools,
         };
         if !allowed || port.is_some_and(|id| !grant.ports.iter().any(|permitted| permitted == id)) {
@@ -655,12 +669,8 @@ impl Authority {
         if permissions.ports.is_empty() || permissions.ports.len() > MAX_PORTS_PER_GRANT {
             return Err(invalid("grant requires 1–64 explicit port IDs"));
         }
-        if permissions.role < RemoteRole::Write
-            && (permissions.automation || permissions.device_plugins)
-        {
-            return Err(invalid(
-                "automation and devicePlugins require at least the write role",
-            ));
+        if permissions.role < RemoteRole::Write && permissions.automation {
+            return Err(invalid("automation requires at least the write role"));
         }
         if (permissions.device_tools || permissions.allow_loan)
             && permissions.role < RemoteRole::Control
@@ -689,6 +699,7 @@ impl Authority {
         let preview_ports = permissions.ports.clone();
         let preview_role = permissions.role;
         let preview_allow_loan = permissions.allow_loan;
+        let preview_device_plugins = permissions.device_plugins;
         registry.invitations.insert(
             digest(code.as_bytes()),
             Invitation {
@@ -712,6 +723,7 @@ impl Authority {
             ports: preview_ports,
             role: Some(preview_role),
             allow_loan: preview_allow_loan,
+            device_plugins: preview_device_plugins,
         })
     }
 

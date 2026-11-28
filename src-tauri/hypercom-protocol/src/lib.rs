@@ -19,11 +19,14 @@ pub use ipc::{
     connect_local_stream, validate_endpoint_name, BoxedStream, IpcStream, LocalListener,
 };
 pub use protocol::{
-    read_frame, read_json_frame, read_limited_frame, write_frame, write_json_frame, ControlCommand,
-    EventPageDto, ExpectSpec, FrameEnvelope, HostError, LoanInfoDto, PortRef, PortSnapshotDto,
+    read_frame, read_json_frame, read_limited_frame, write_frame, write_json_frame,
+    ArtifactInfoDto, ControlCommand, EventPageDto, ExpectSpec, FrameEnvelope, HostError,
+    LoanInfoDto, PluginJobEventDto, PluginJobStatusDto, PluginToolDescriptorDto,
+    PluginToolInvokeResultDto, PortRef, PortSnapshotDto, RemotePluginViewEntryDto,
+    RemoteViewAssetDto, RemoteViewEventDto, RemoteViewEventPageDto, RemoteViewSessionDto,
     ReplyEnvelope, RequestOutcomeDto, SerialParamsDto, SerialRecoveryDto, StreamEventDto,
-    DEFAULT_ENDPOINT, MAX_EXPECT_BYTES, MAX_EXPECT_MS, MAX_FRAME_BYTES, MAX_POLL_MS,
-    MAX_WRITE_BYTES, PROTOCOL_VERSION,
+    DEFAULT_ENDPOINT, MAX_ARTIFACT_CHUNK_BYTES, MAX_EXPECT_BYTES, MAX_EXPECT_MS,
+    MAX_FRAME_BYTES, MAX_POLL_MS, MAX_WRITE_BYTES, PROTOCOL_VERSION,
 };
 pub use tls::{
     build_tls_acceptor, build_tls_acceptor_from_der, connect_pinned_tls, decode_sha256_pin,
