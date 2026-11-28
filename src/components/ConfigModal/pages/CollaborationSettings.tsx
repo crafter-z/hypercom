@@ -77,6 +77,8 @@ const CollaborationSettings: React.FC = () => {
   const [invitePorts, setInvitePorts] = useState<string[]>([]);
   const [inviteRole, setInviteRole] = useState<RemoteRole>('observe');
   const [inviteAllowLoan, setInviteAllowLoan] = useState(false);
+  const [inviteDevicePlugins, setInviteDevicePlugins] = useState(false);
+  const [devicePluginsTouched, setDevicePluginsTouched] = useState(false);
   const [inviteTtlSecs, setInviteTtlSecs] = useState(300);
   const [inviteBusy, setInviteBusy] = useState(false);
   const [generatedInvite, setGeneratedInvite] = useState<RemoteInviteDto | null>(null);
@@ -100,9 +102,9 @@ const CollaborationSettings: React.FC = () => {
         controlService.remoteHostListClients().catch(() => [] as RemoteClientDto[]),
         controlService.remoteClientListProfiles().catch(() => [] as RemoteProfileSummaryDto[]),
       ]);
-      setStatus(collab);
-      setClients(remoteClients);
-      setProfiles(remoteProfiles);
+      setStatus(collab ?? null);
+      setClients(Array.isArray(remoteClients) ? remoteClients : []);
+      setProfiles(Array.isArray(remoteProfiles) ? remoteProfiles : []);
     } catch (err) {
       notifyError(err);
     } finally {
@@ -201,6 +203,7 @@ const CollaborationSettings: React.FC = () => {
         ports: invitePorts,
         role: inviteRole,
         allowLoan: inviteRole === 'control' && inviteAllowLoan,
+        devicePlugins: inviteDevicePlugins,
         ttlSecs: inviteTtlSecs,
       });
       setGeneratedInvite(invite);
@@ -537,7 +540,7 @@ const CollaborationSettings: React.FC = () => {
             </div>
 
             <div className="collab-form-row collab-role-row">
-              <div className="collab-field">
+              <div className="collab-field collab-field-auto">
                 <span>{t('collaboration.invite.role')}</span>
                 <SegmentedControl<RemoteRole>
                   aria-label={t('collaboration.invite.role')}
@@ -546,6 +549,9 @@ const CollaborationSettings: React.FC = () => {
                   onChange={(role) => {
                     setInviteRole(role);
                     if (role !== 'control') setInviteAllowLoan(false);
+                    if (role === 'control' && !devicePluginsTouched) {
+                      setInviteDevicePlugins(true);
+                    }
                   }}
                 />
               </div>
@@ -559,6 +565,18 @@ const CollaborationSettings: React.FC = () => {
                 {t('collaboration.invite.allowLoan')}
               </label>
             </div>
+
+            <label className="checkbox-wrapper collab-device-plugins">
+              <input
+                type="checkbox"
+                checked={inviteDevicePlugins}
+                onChange={(e) => {
+                  setDevicePluginsTouched(true);
+                  setInviteDevicePlugins(e.target.checked);
+                }}
+              />
+              {t('collaboration.invite.devicePlugins')}
+            </label>
 
             <div className="collab-field">
               <span>{t('collaboration.invite.ports')}</span>
@@ -580,7 +598,7 @@ const CollaborationSettings: React.FC = () => {
               )}
             </div>
 
-            <div>
+            <div className="collab-invite-actions">
               <button
                 type="button"
                 className="btn btn-primary btn-sm"
@@ -590,6 +608,9 @@ const CollaborationSettings: React.FC = () => {
               >
                 {t('collaboration.invite.generate')}
               </button>
+              {!status?.remote.enabled && (
+                <span className="collab-empty-hint">{t('collaboration.invite.requireHostRunning')}</span>
+              )}
             </div>
 
             {generatedInvite && (
@@ -627,6 +648,9 @@ const CollaborationSettings: React.FC = () => {
                       </span>
                       {client.permissions.allowLoan && (
                         <span className="port-item-badge">{t('collaboration.invite.allowLoan')}</span>
+                      )}
+                      {client.permissions.devicePlugins && (
+                        <span className="port-item-badge">{t('collaboration.badge.plugins')}</span>
                       )}
                       {client.revoked && (
                         <span className="collab-status-pill is-revoked">{t('collaboration.clients.revoked')}</span>
@@ -705,6 +729,10 @@ const CollaborationSettings: React.FC = () => {
                   <span className="collab-meta-label">{t('collaboration.pair.previewRole')}</span>
                   <span>{preview.role ? t(`collaboration.role.${preview.role}`) : 'observe'}</span>
                 </div>
+                <div className="collab-meta-item">
+                  <span className="collab-meta-label">{t('collaboration.pair.previewPlugins')}</span>
+                  <span>{preview.devicePlugins ? t('collaboration.pair.previewPluginsAllowed') : t('collaboration.pair.previewPluginsDisabled')}</span>
+                </div>
                 <div className="collab-meta-item collab-meta-item-wide">
                   <span className="collab-meta-label">{t('collaboration.pair.previewFingerprint')}</span>
                   <code className="collab-code collab-code-wrap">{preview.certificateSha256}</code>
@@ -778,6 +806,9 @@ const CollaborationSettings: React.FC = () => {
                         <span className={`port-item-badge remote-role role-${profile.role}`}>
                           {t(`collaboration.role.${profile.role}`)}
                         </span>
+                        {profile.devicePlugins && (
+                          <span className="port-item-badge">{t('collaboration.badge.plugins')}</span>
+                        )}
                         <span className="collab-meta-count">
                           {t('collaboration.profiles.portCount', { count: profile.portCount })}
                         </span>

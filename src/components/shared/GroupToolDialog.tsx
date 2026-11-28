@@ -35,27 +35,35 @@ const GroupToolDialog: React.FC<GroupToolDialogProps> = ({
       open
       onClose={onClose}
       labelledBy="group-tool-dialog-title"
-      dialogClassName="modal-dialog-compact animate-slide-up"
+      dialogClassName="modal-dialog-compact group-tool-dialog animate-slide-up"
       onOverlayClick={onClose}
     >
       <h3 className="modal-dialog-title" id="group-tool-dialog-title">{t('groupTool.title')}</h3>
-      <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 12 }}>
+      <p className="modal-dialog-message">
         {hasUnconfigured
           ? t('groupTool.message', { configured: configured.length, unconfigured: unconfigured.length })
           : t('groupTool.noConfigured')}
       </p>
       <div className="modal-dialog-actions">
-        <button className="btn" onClick={onClose}>{t('groupTool.cancel')}</button>
+        <button type="button" className="btn" onClick={onClose}>{t('groupTool.cancel')}</button>
         {hasUnconfigured && (
-          <button className="btn" onClick={onConfigure}>{t('groupTool.configureMissing')}</button>
+          <button
+            type="button"
+            className={configured.length === 0 ? 'btn btn-primary' : 'btn'}
+            onClick={onConfigure}
+          >
+            {t('groupTool.configureMissing')}
+          </button>
         )}
-        <button
-          className="btn btn-primary"
-          disabled={configured.length === 0}
-          onClick={onRun}
-        >
-          {t('groupTool.runConfigured')}
-        </button>
+        {configured.length > 0 && (
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={onRun}
+          >
+            {t('groupTool.runConfigured')}
+          </button>
+        )}
       </div>
     </Modal>
   );

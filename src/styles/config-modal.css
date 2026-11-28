@@ -29,6 +29,7 @@
   width: auto;
   height: auto;
   min-width: 340px;
+  min-height: 0;
   max-width: 90vw;
   max-height: 85vh;
   padding: 20px 24px;
@@ -39,6 +40,14 @@
   flex-direction: column;
   overflow-y: auto;
   box-shadow: var(--shadow-lg);
+}
+
+.group-tool-dialog {
+  max-width: min(460px, 92vw);
+}
+
+.alias-dialog {
+  width: min(420px, 92vw);
 }
 
 /* ==================== About 弹窗 ==================== */
@@ -204,7 +213,7 @@
 }
 
 .modal-nav {
-  width: 180px;
+  width: 190px;
   background: var(--bg-dialog-muted);
   border-right: 1px solid var(--border-subtle);
   display: flex;
@@ -212,19 +221,21 @@
 }
 
 .modal-nav-header {
-  padding: 16px 12px;
+  padding: 12px 12px 10px;
   border-bottom: 1px solid var(--border-subtle);
 }
 
 .modal-nav-title {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
+  line-height: 20px;
 }
 
 .modal-nav-list {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 4px 0;
+  padding: 6px 0 8px;
 }
 
 .modal-nav-item {
@@ -232,20 +243,22 @@
    * (border, background, centered text, raised padding, inherited-shadow font)
    * must be neutralized to keep the original look. */
   width: 100%;
-  padding: 8px 16px;
+  padding: 5px 12px;
+  min-height: 28px;
   border: none;
   border-left: 3px solid transparent;
   border-radius: 0;
   background: transparent;
   cursor: pointer;
   font: inherit;
-  font-size: 13px;
+  font-size: 12.5px;
+  line-height: 18px;
   color: var(--text-primary);
   text-align: left;
   display: flex;
   align-items: center;
   gap: 8px;
-  transition: all var(--transition-fast);
+  transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
 }
 
 .modal-nav-item:focus-visible {
@@ -267,8 +280,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   flex-shrink: 0;
 }
 
@@ -339,6 +352,7 @@
 .modal-dialog-actions {
   display: flex;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -346,6 +360,18 @@
   font-size: 16px;
   font-weight: 600;
   margin-bottom: 8px;
+}
+
+.modal-dialog-message {
+  margin: 0 0 18px;
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.modal-dialog-message--compact {
+  margin-bottom: 12px;
 }
 
 /* ==================== Config Page ==================== */
@@ -364,6 +390,22 @@
 .config-section-title {
   font-size: 14px;
   font-weight: 600;
+}
+
+.config-page-top-bar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.config-page-top-bar .config-page-summary {
+  flex: 1;
+  min-width: 0;
+}
+
+.config-page-top-bar > .btn {
+  flex-shrink: 0;
 }
 
 .config-page-desc,
@@ -1143,18 +1185,19 @@
 }
 
 .modal-nav-group + .modal-nav-group {
-  margin-top: var(--space-2);
-  padding-top: var(--space-2);
+  margin-top: 6px;
+  padding-top: 6px;
   border-top: 1px solid var(--border-subtle);
 }
 
 .modal-nav-group-label {
-  padding: 2px var(--space-3);
+  padding: 1px var(--space-3) 2px;
   font-size: var(--text-2xs);
+  line-height: 1.35;
   font-weight: var(--weight-semibold);
   color: var(--text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
 }
 
 .modal-nav-group-items {
@@ -1402,11 +1445,17 @@
 }
 
 @media (max-width: 680px) {
-  .modal-dialog {
+  .modal-dialog:not(.modal-dialog-compact) {
     width: calc(100vw - 24px);
     height: calc(100vh - 24px);
     min-width: 0;
     min-height: 0;
+  }
+
+  .modal-dialog-compact {
+    min-width: 0;
+    max-width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
   }
 
   .modal-nav {
@@ -1417,7 +1466,8 @@
     padding: 12px;
   }
 
-  .backup-actions-grid {
+  .backup-actions-grid,
+  .collab-form-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1427,12 +1477,16 @@
 }
 
 @media (max-width: 480px) {
-  .modal-dialog {
+  .modal-dialog:not(.modal-dialog-compact) {
     width: 100vw;
     height: 100vh;
     max-width: none;
     max-height: none;
     border-radius: 0;
+  }
+
+  .modal-dialog-compact {
+    padding: 16px 18px;
   }
 
   .modal-nav {
@@ -1520,7 +1574,14 @@
 .collab-meta-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: var(--space-2);
+  gap: var(--space-2) var(--space-3);
+}
+
+.collab-host-live-meta {
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
 }
 
 .collab-meta-item {
@@ -1566,6 +1627,11 @@
   align-items: center;
   gap: var(--space-2);
   flex-wrap: wrap;
+}
+
+.collab-copy-inline .collab-code-wrap {
+  flex: 1 1 240px;
+  min-width: 0;
 }
 
 .collab-subblock {
@@ -1678,7 +1744,7 @@
 
 .collab-form-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
   gap: var(--space-2);
   align-items: end;
 }
@@ -1694,14 +1760,22 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
-  flex: 1 1 180px;
   min-width: 0;
   font-size: var(--text-xs);
   color: var(--text-secondary);
 }
 
-.collab-field-ttl {
+.collab-form-row > .collab-field {
+  flex: 1 1 180px;
+}
+
+.collab-form-row > .collab-field-ttl {
   flex: 0 0 100px;
+}
+
+.collab-form-row > .collab-field-auto {
+  flex: 0 0 auto;
+  align-items: flex-start;
 }
 
 .collab-field-action {
@@ -1709,19 +1783,47 @@
   justify-content: flex-start;
 }
 
+.collab-field-action .btn {
+  min-height: 28px;
+  padding: 4px var(--space-3);
+}
+
 .collab-invite-form {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-3);
 }
 
 .collab-role-row {
-  align-items: center;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.collab-role-row .segmented-btn {
+  height: 26px;
 }
 
 .collab-allow-loan {
   font-size: var(--text-xs);
-  margin-top: 14px;
+  min-height: 26px;
+}
+
+.collab-allow-loan:has(input:disabled) {
+  color: var(--text-secondary);
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.collab-device-plugins {
+  font-size: var(--text-xs);
+  min-height: 22px;
+}
+
+.collab-invite-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 
 .collab-port-checks {

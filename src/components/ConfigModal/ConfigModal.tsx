@@ -43,7 +43,7 @@ interface NavItem {
   icon: React.ReactNode;
 }
 
-type NavGroupId = 'generalDisplay' | 'loggingBackup' | 'rulesAutomation' | 'plugins' | 'collaboration';
+type NavGroupId = 'generalDisplay' | 'loggingBackup' | 'rulesAutomation' | 'plugins';
 
 interface NavGroup {
   id: NavGroupId;
@@ -55,21 +55,20 @@ const navGroups: NavGroup[] = [
   { id: 'loggingBackup', labelKey: 'configModal.group.loggingBackup' },
   { id: 'rulesAutomation', labelKey: 'configModal.group.rulesAutomation' },
   { id: 'plugins', labelKey: 'configModal.group.plugins' },
-  { id: 'collaboration', labelKey: 'configModal.group.collaboration' },
 ];
 
 const navItems: NavItem[] = [
-  { id: 'general', labelKey: 'configModal.nav.general', keywordsKey: 'configModal.navKeywords.general', groupId: 'generalDisplay', icon: <Settings size={16} /> },
-  { id: 'display', labelKey: 'configModal.nav.display', keywordsKey: 'configModal.navKeywords.display', groupId: 'generalDisplay', icon: <Monitor size={16} /> },
-  { id: 'log', labelKey: 'configModal.nav.log', keywordsKey: 'configModal.navKeywords.log', groupId: 'loggingBackup', icon: <FileText size={16} /> },
-  { id: 'backup', labelKey: 'configModal.nav.backup', keywordsKey: 'configModal.navKeywords.backup', groupId: 'loggingBackup', icon: <HardDrive size={16} /> },
-  { id: 'highlight', labelKey: 'configModal.nav.highlight', keywordsKey: 'configModal.navKeywords.highlight', groupId: 'rulesAutomation', icon: <Palette size={16} /> },
-  { id: 'commands', labelKey: 'configModal.nav.commands', keywordsKey: 'configModal.navKeywords.commands', groupId: 'rulesAutomation', icon: <Send size={16} /> },
-  { id: 'protocol', labelKey: 'configModal.nav.protocol', keywordsKey: 'configModal.navKeywords.protocol', groupId: 'rulesAutomation', icon: <Code2 size={16} /> },
-  { id: 'triggers', labelKey: 'config.triggerSettings', keywordsKey: 'configModal.navKeywords.triggers', groupId: 'rulesAutomation', icon: <Zap size={16} /> },
-  { id: 'tools', labelKey: 'configModal.nav.tools', keywordsKey: 'configModal.navKeywords.tools', groupId: 'rulesAutomation', icon: <Wrench size={16} /> },
-  { id: 'plugins', labelKey: 'configModal.nav.plugins', keywordsKey: 'configModal.navKeywords.plugins', groupId: 'plugins', icon: <Plug size={16} /> },
-  { id: 'collaboration', labelKey: 'configModal.nav.collaboration', keywordsKey: 'configModal.navKeywords.collaboration', groupId: 'collaboration', icon: <Radio size={16} /> },
+  { id: 'general', labelKey: 'configModal.nav.general', keywordsKey: 'configModal.navKeywords.general', groupId: 'generalDisplay', icon: <Settings size={15} /> },
+  { id: 'display', labelKey: 'configModal.nav.display', keywordsKey: 'configModal.navKeywords.display', groupId: 'generalDisplay', icon: <Monitor size={15} /> },
+  { id: 'log', labelKey: 'configModal.nav.log', keywordsKey: 'configModal.navKeywords.log', groupId: 'loggingBackup', icon: <FileText size={15} /> },
+  { id: 'backup', labelKey: 'configModal.nav.backup', keywordsKey: 'configModal.navKeywords.backup', groupId: 'loggingBackup', icon: <HardDrive size={15} /> },
+  { id: 'highlight', labelKey: 'configModal.nav.highlight', keywordsKey: 'configModal.navKeywords.highlight', groupId: 'rulesAutomation', icon: <Palette size={15} /> },
+  { id: 'commands', labelKey: 'configModal.nav.commands', keywordsKey: 'configModal.navKeywords.commands', groupId: 'rulesAutomation', icon: <Send size={15} /> },
+  { id: 'protocol', labelKey: 'configModal.nav.protocol', keywordsKey: 'configModal.navKeywords.protocol', groupId: 'rulesAutomation', icon: <Code2 size={15} /> },
+  { id: 'triggers', labelKey: 'config.triggerSettings', keywordsKey: 'configModal.navKeywords.triggers', groupId: 'rulesAutomation', icon: <Zap size={15} /> },
+  { id: 'tools', labelKey: 'configModal.nav.tools', keywordsKey: 'configModal.navKeywords.tools', groupId: 'rulesAutomation', icon: <Wrench size={15} /> },
+  { id: 'plugins', labelKey: 'configModal.nav.plugins', keywordsKey: 'configModal.navKeywords.plugins', groupId: 'plugins', icon: <Plug size={15} /> },
+  { id: 'collaboration', labelKey: 'configModal.nav.collaboration', keywordsKey: 'configModal.navKeywords.collaboration', groupId: 'plugins', icon: <Radio size={15} /> },
 ];
 
 const ENTITY_TO_TAB: Record<EntityKey, string> = {

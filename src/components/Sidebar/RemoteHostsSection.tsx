@@ -1,9 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronRight, Globe, Loader2, PlugZap, Settings, Unplug } from 'lucide-react';
-import { controlService, eventService, type RemoteProfileSummaryDto } from '../../services/tauri';
+import { ChevronRight, Globe, Loader2, Plug, PlugZap, Settings, Unplug } from 'lucide-react';
+import {
+  controlService,
+  eventService,
+  type RemotePluginViewEntryDto,
+  type RemoteProfileSummaryDto,
+} from '../../services/tauri';
 import { notifyError } from '../../stores/useToastStore';
 import type { SerialPort } from '../../types';
+import { openRemotePluginViewTab } from '../../utils/pluginViewRuntime';
 import { PortItemRow } from './SortablePortItem';
 
 interface RemoteHostsSectionProps {
@@ -23,6 +29,7 @@ const RemoteHostsSection: React.FC<RemoteHostsSectionProps> = ({
 }) => {
   const { t } = useTranslation();
   const [profiles, setProfiles] = useState<RemoteProfileSummaryDto[]>([]);
+  const [pluginViewsByHost, setPluginViewsByHost] = useState<Record<string, RemotePluginViewEntryDto[]>>({});
   const [expandedMap, setExpandedMap] = useState<Record<string, boolean>>({});
   const [busyProfileId, setBusyProfileId] = useState<string | null>(null);
   const [connectingAll, setConnectingAll] = useState(false);
@@ -30,7 +37,7 @@ const RemoteHostsSection: React.FC<RemoteHostsSectionProps> = ({
   const loadProfiles = useCallback(async () => {
     try {
       const list = await controlService.remoteClientListProfiles();
-      setProfiles(list);
+      setProfiles(Array.isArray(list) ? list : []);
     } catch (err) {
       console.debug('[RemoteHostsSection] Failed to list remote profiles:', err);
     }
@@ -56,6 +63,38 @@ const RemoteHostsSection: React.FC<RemoteHostsSectionProps> = ({
     };
   }, [loadProfiles]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const eligibleProfiles = profiles.filter((p) => p.status === 'connected' && p.devicePlugins);
+    if (eligibleProfiles.length === 0 || typeof controlService?.remoteListPluginViews !== 'function') {
+      setPluginViewsByHost({});
+      return;
+    }
+    void Promise.all(
+      eligibleProfiles.map(async (p) => {
+        try {
+          const views = await controlService.remoteListPluginViews(p.id);
+          const workspaceViews = Array.isArray(views)
+            ? views.filter((view) => !view.placements?.length || view.placements.includes('workspace-tab'))
+            : [];
+          return [p.id, workspaceViews] as const;
+        } catch {
+          return [p.id, [] as RemotePluginViewEntryDto[]] as const;
+        }
+      }),
+    ).then((entries) => {
+      if (cancelled) return;
+      const next: Record<string, RemotePluginViewEntryDto[]> = {};
+      for (const [id, views] of entries) {
+        if (views.length > 0) next[id] = views;
+      }
+      setPluginViewsByHost(next);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [profiles]);
+
   const hostEntries = useMemo(() => {
     const byHostId = new Map<string, SerialPort[]>();
     for (const port of remotePorts) {
@@ -67,6 +106,7 @@ const RemoteHostsSection: React.FC<RemoteHostsSectionProps> = ({
     const entries = profiles.map((profile) => ({
       profile,
       ports: byHostId.get(profile.id) ?? [],
+      pluginViews: pluginViewsByHost[profile.id] ?? [],
     }));
     const knownIds = new Set(profiles.map((p) => p.id));
     for (const [hostId, ports] of byHostId) {
@@ -86,14 +126,15 @@ const RemoteHostsSection: React.FC<RemoteHostsSectionProps> = ({
             portCount: ports.length,
           },
           ports,
+          pluginViews: [],
         });
       }
     }
     if (searchActive) {
-      return entries.filter((entry) => entry.ports.length > 0);
+      return entries.filter((entry) => entry.ports.length > 0 || entry.pluginViews.length > 0);
     }
     return entries;
-  }, [profiles, remotePorts, searchActive]);
+  }, [profiles, remotePorts, pluginViewsByHost, searchActive]);
 
   if (profiles.length === 0 && remotePorts.length === 0) {
     return null;
@@ -146,6 +187,25 @@ const RemoteHostsSection: React.FC<RemoteHostsSectionProps> = ({
     }
   };
 
+  const handleOpenRemotePluginView = (
+    profile: RemoteProfileSummaryDto,
+    view: RemotePluginViewEntryDto,
+  ) => {
+    try {
+      openRemotePluginViewTab({
+        profileId: profile.id,
+        hostLabel: profile.label,
+        pluginId: view.pluginId,
+        pluginName: view.pluginName,
+        installGeneration: view.installGeneration,
+        viewId: view.viewId,
+        label: view.label,
+      });
+    } catch (err) {
+      notifyError(err);
+    }
+  };
+
   return (
     <div className="sidebar-section sidebar-remote-section">
       <div className="sidebar-section-header sidebar-remote-section-header">
@@ -174,10 +234,10 @@ const RemoteHostsSection: React.FC<RemoteHostsSectionProps> = ({
           </button>
         </div>
       </div>
-      {hostEntries.map(({ profile, ports }) => {
+      {hostEntries.map(({ profile, ports, pluginViews }) => {
         const isConnected = profile.status === 'connected';
         const isConnecting = profile.status === 'connecting' || busyProfileId === profile.id;
-        const expanded = expandedMap[profile.id] ?? (isConnected || ports.length > 0);
+        const expanded = expandedMap[profile.id] ?? (isConnected || ports.length > 0 || pluginViews.length > 0);
         const roleLabel = t(`collaboration.role.${profile.role}`);
         const statusTitle = t(`sidebar.port.status.${profile.status}`);
         return (
@@ -239,11 +299,31 @@ const RemoteHostsSection: React.FC<RemoteHostsSectionProps> = ({
                       isConnected={port.status === 'connected'}
                     />
                   ))
-                ) : (
+                ) : pluginViews.length === 0 ? (
                   <div className="remote-host-empty">
                     {isConnected
                       ? t('sidebar.remoteHosts.noPorts')
                       : t('sidebar.remoteHosts.disconnectedHint')}
+                  </div>
+                ) : null}
+                {pluginViews.length > 0 && (
+                  <div className="remote-host-plugins" role="group" aria-label={t('sidebar.remoteHosts.pluginsSection')}>
+                    {pluginViews.map((view) => (
+                      <button
+                        key={`${view.pluginId}:${view.viewId}`}
+                        type="button"
+                        className="remote-host-plugin-item"
+                        title={t('sidebar.remoteHosts.openPluginView', {
+                          plugin: view.pluginName || view.pluginId,
+                          label: view.label,
+                        })}
+                        onClick={() => handleOpenRemotePluginView(profile, view)}
+                      >
+                        <Plug size={12} className="remote-host-plugin-icon" aria-hidden="true" />
+                        <span className="remote-host-plugin-label">{view.label}</span>
+                        <span className="remote-host-plugin-name">{view.pluginName || view.pluginId}</span>
+                      </button>
+                    ))}
                   </div>
                 )}
               </div>

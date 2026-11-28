@@ -29,12 +29,12 @@ const AliasDialog: React.FC<AliasDialogProps> = ({
       open
       onClose={onCancel}
       labelledBy="alias-dialog-title"
-      dialogClassName="modal-dialog-compact animate-slide-up"
+      dialogClassName="modal-dialog-compact alias-dialog animate-slide-up"
       onOverlayClick={onCancel}
       initialFocusRef={inputRef}
     >
       <h3 className="modal-dialog-title" id="alias-dialog-title">{t('aliasDialog.title')}</h3>
-      <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 12 }}>
+      <p className="modal-dialog-message modal-dialog-message--compact">
         {t('aliasDialog.description', { portId })}
       </p>
       <input
